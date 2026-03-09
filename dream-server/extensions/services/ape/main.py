@@ -3,6 +3,11 @@
 APE — Agent Policy Engine
 Dream Server extension: policy gateway for autonomous agent tool calls.
 
+This is a lightweight Python reimplementation of the APE formal policy engine.
+The full engine — including Rocq/Coq formal proofs of conscience predicates G1-G6,
+trust algebra, and neurosymbolic runtime — is open-source under AGPL v3:
+  https://github.com/latentcollapse/HLX_research_language
+
 Provides:
   POST /verify        — evaluate an action against the active policy
   GET  /audit         — tail the audit log

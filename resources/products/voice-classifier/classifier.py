@@ -9,6 +9,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
+try:
+    import httpx
+    HTTPX_AVAILABLE = True
+except ImportError:
+    HTTPX_AVAILABLE = False
+
 
 @dataclass
 class ClassificationResult:
@@ -144,11 +150,11 @@ class QwenClassifier(IntentClassifier):
                  threshold: float = 0.85,
                  model: str = "Qwen/Qwen2.5-32B-Instruct-AWQ"):
         import os
-        # Read from env var or default to localhost for Docker
         self.base_url = base_url or os.getenv("VLLM_URL", "http://vllm:8000/v1")
         self.threshold = threshold
         self.model = model
         self._session = None
+        self._async_client: "httpx.AsyncClient | None" = None
     
     def _get_session(self):
         """Lazy init requests session."""
@@ -156,45 +162,20 @@ class QwenClassifier(IntentClassifier):
             import requests
             self._session = requests.Session()
         return self._session
+
+    def _get_async_client(self) -> "httpx.AsyncClient":
+        """Lazy init httpx async client for non-blocking calls."""
+        if not HTTPX_AVAILABLE:
+            raise ImportError("httpx is required for async_predict. Install: pip install httpx")
+        if self._async_client is None:
+            self._async_client = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+        return self._async_client
     
     def predict(self, text: str) -> ClassificationResult:
-        """Classify using local Qwen with structured output."""
+        """Classify using local Qwen with structured output (sync/blocking)."""
         import json
         
-        system_prompt = f"""You are an intent classifier for an HVAC voice agent.
-Analyze the user's utterance and classify it into one of these intents:
-
-HIGH-LEVEL INTENTS:
-- schedule_service: User wants to book an appointment
-- get_quote: User wants pricing information  
-- emergency: User has an urgent issue (no heat, gas leak, pipe burst)
-- check_status: User wants to check existing appointment or order
-- hours_location: User asks about business hours or location
-- take_order: User wants to place an order
-- troubleshoot: User needs help diagnosing a problem
-- transfer_human: User wants to speak to a person
-- goodbye: User is ending the conversation
-
-FLOW-SPECIFIC INTENTS (during active conversation):
-- describe_issue: User describes their HVAC problem ("heater broken", "not cooling", "making noise")
-- provide_time: User provides preferred appointment time ("tomorrow at 2pm", "next week")
-- provide_date: User provides a date without time ("tomorrow", "Monday", "next week")
-- provide_name: User provides their name ("my name is John", "I'm Sarah")
-- provide_service_type: User specifies service type ("heating repair", "AC maintenance")
-- provide_contact: User provides contact info ("my email is", "call me at")
-- confirm_yes: User confirms or agrees ("yes", "yeah", "that works", "correct", "sounds good")
-- confirm_no: User denies or disagrees ("no", "nope", "wrong", "change it", "different")
-- check_order: User wants to check order status ("where is my order", "tracking")
-- modify_order: User wants to modify existing order ("change my order", "update")
-- cancel_order: User wants to cancel order ("cancel", "don't want it anymore")
-- ask_question: User asks a general question ("how does this work", "what is")
-
-Use flow-specific intents when the user is clearly responding within an active conversation flow.
-Use high-level intents for opening statements or topic changes.
-- fallback: None of the above apply
-
-Respond ONLY with JSON in this exact format:
-{{"intent": "<intent_name>", "confidence": 0.XX}}"""
+        system_prompt = self._build_system_prompt()
 
         try:
             # Escape user text to prevent prompt injection
@@ -244,6 +225,98 @@ Respond ONLY with JSON in this exact format:
             # Fallback on any error
             return ClassificationResult("fallback", 0.0)
     
+    async def async_predict(self, text: str) -> ClassificationResult:
+        """Non-blocking classify using httpx.AsyncClient.
+        
+        Use this from async callers (e.g. LiveKit voice pipeline) to avoid
+        blocking the event loop. Falls back to sync predict via to_thread
+        if httpx is not installed.
+        """
+        import json
+
+        if not HTTPX_AVAILABLE:
+            import asyncio
+            return await asyncio.to_thread(self.predict, text)
+
+        system_prompt = self._build_system_prompt()
+
+        try:
+            escaped_text = json.dumps(text)[1:-1]
+            client = self._get_async_client()
+            response = await client.post(
+                f"{self.base_url}/chat/completions",
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f'Classify the following user utterance:\n\n"{escaped_text}"'}
+                    ],
+                    "temperature": 0.1,
+                    "max_tokens": 100
+                },
+            )
+            response.raise_for_status()
+
+            content = response.json()["choices"][0]["message"]["content"]
+
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+
+            result = json.loads(content.strip())
+            intent = result.get("intent", "fallback")
+            confidence = float(result.get("confidence", 0.0))
+
+            if intent not in self.INTENTS:
+                intent = "fallback"
+                confidence = 0.0
+
+            if confidence < self.threshold:
+                intent = "fallback"
+
+            return ClassificationResult(intent, confidence)
+
+        except Exception:
+            return ClassificationResult("fallback", 0.0)
+
+    def _build_system_prompt(self) -> str:
+        """Build the classification system prompt (shared by sync and async)."""
+        return f"""You are an intent classifier for an HVAC voice agent.
+Analyze the user's utterance and classify it into one of these intents:
+
+HIGH-LEVEL INTENTS:
+- schedule_service: User wants to book an appointment
+- get_quote: User wants pricing information  
+- emergency: User has an urgent issue (no heat, gas leak, pipe burst)
+- check_status: User wants to check existing appointment or order
+- hours_location: User asks about business hours or location
+- take_order: User wants to place an order
+- troubleshoot: User needs help diagnosing a problem
+- transfer_human: User wants to speak to a person
+- goodbye: User is ending the conversation
+
+FLOW-SPECIFIC INTENTS (during active conversation):
+- describe_issue: User describes their HVAC problem ("heater broken", "not cooling", "making noise")
+- provide_time: User provides preferred appointment time ("tomorrow at 2pm", "next week")
+- provide_date: User provides a date without time ("tomorrow", "Monday", "next week")
+- provide_name: User provides their name ("my name is John", "I'm Sarah")
+- provide_service_type: User specifies service type ("heating repair", "AC maintenance")
+- provide_contact: User provides contact info ("my email is", "call me at")
+- confirm_yes: User confirms or agrees ("yes", "yeah", "that works", "correct", "sounds good")
+- confirm_no: User denies or disagrees ("no", "nope", "wrong", "change it", "different")
+- check_order: User wants to check order status ("where is my order", "tracking")
+- modify_order: User wants to modify existing order ("change my order", "update")
+- cancel_order: User wants to cancel order ("cancel", "don't want it anymore")
+- ask_question: User asks a general question ("how does this work", "what is")
+
+Use flow-specific intents when the user is clearly responding within an active conversation flow.
+Use high-level intents for opening statements or topic changes.
+- fallback: None of the above apply
+
+Respond ONLY with JSON in this exact format:
+{{"intent": "<intent_name>", "confidence": 0.XX}}"""
+
     def predict_batch(self, texts: List[str]) -> List[ClassificationResult]:
         return [self.predict(t) for t in texts]
     

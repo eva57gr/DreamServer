@@ -20,6 +20,7 @@ import os
 import asyncio
 import logging
 import json
+import time
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Optional, List, Dict, Any, Literal
@@ -28,6 +29,7 @@ from contextlib import asynccontextmanager
 import asyncpg
 from fastapi import FastAPI, Query, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -250,6 +252,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# ============================================
+# TTL Cache for dashboard queries
+# ============================================
+
+_cache: Dict[str, Any] = {}
+_cache_ts: Dict[str, float] = {}
+CACHE_TTL_SECONDS = 30
+
+def _cache_get(key: str) -> Optional[Any]:
+    """Return cached value if present and not expired."""
+    ts = _cache_ts.get(key)
+    if ts is not None and (time.monotonic() - ts) < CACHE_TTL_SECONDS:
+        return _cache[key]
+    return None
+
+def _cache_set(key: str, value: Any) -> None:
+    _cache[key] = value
+    _cache_ts[key] = time.monotonic()
+
 # ============================================
 # Response Models
 # ============================================
@@ -398,6 +421,11 @@ async def get_usage(
     Returns time-series data suitable for charts showing token consumption
     and cost over the specified period.
     """
+    cache_key = f"usage:{period}:{agent_id}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     pool = await get_db_pool()
     
     time_delta = parse_period(period)
@@ -405,84 +433,91 @@ async def get_usage(
     start_time = datetime.utcnow() - time_delta
     
     try:
-        async with pool.acquire() as conn:
-            # Build query with optional agent filter
-            agent_filter = ""
-            params = [start_time]
-            
-            if agent_id:
-                # Need to join with sessions table to filter by agent
-                agent_filter = """
-                    AND session_id IN (
-                        SELECT session_id FROM sessions 
-                        WHERE agent_name = $2
-                    )
-                """
-                params.append(agent_id)
-            
-            # Main aggregation query using TimescaleDB time_bucket
-            query = f"""
-                SELECT 
-                    time_bucket('{time_bucket}', timestamp) AS bucket,
-                    SUM(total_tokens) AS total_tokens,
-                    SUM(prompt_tokens) AS prompt_tokens,
-                    SUM(completion_tokens) AS completion_tokens,
-                    COUNT(*) AS request_count,
-                    SUM(total_cost) AS total_cost,
-                    AVG(latency_ms) AS avg_latency_ms
-                FROM api_requests
-                WHERE timestamp >= $1
-                {agent_filter}
-                GROUP BY bucket
-                ORDER BY bucket ASC
+        # Build query with optional agent filter
+        agent_filter = ""
+        params = [start_time]
+        
+        if agent_id:
+            agent_filter = """
+                AND session_id IN (
+                    SELECT session_id FROM sessions 
+                    WHERE agent_name = $2
+                )
             """
-            
-            rows = await conn.fetch(query, *params)
-            
-            # Build response data
-            data = []
-            for row in rows:
-                data.append(UsageDataPoint(
-                    timestamp=row["bucket"].isoformat(),
-                    total_tokens=row["total_tokens"] or 0,
-                    prompt_tokens=row["prompt_tokens"] or 0,
-                    completion_tokens=row["completion_tokens"] or 0,
-                    request_count=row["request_count"] or 0,
-                    total_cost=float(row["total_cost"] or 0),
-                    avg_latency_ms=float(row["avg_latency_ms"]) if row["avg_latency_ms"] else None
-                ))
-            
-            # Get summary stats
-            summary_query = f"""
-                SELECT 
-                    SUM(total_tokens) AS total_tokens,
-                    SUM(prompt_tokens) AS total_prompt_tokens,
-                    SUM(completion_tokens) AS total_completion_tokens,
-                    COUNT(*) AS total_requests,
-                    SUM(total_cost) AS total_cost,
-                    AVG(latency_ms) AS avg_latency_ms
-                FROM api_requests
-                WHERE timestamp >= $1
-                {agent_filter}
-            """
-            
-            summary_row = await conn.fetchrow(summary_query, *params)
-            
-            summary = {
-                "total_tokens": summary_row["total_tokens"] or 0,
-                "total_prompt_tokens": summary_row["total_prompt_tokens"] or 0,
-                "total_completion_tokens": summary_row["total_completion_tokens"] or 0,
-                "total_requests": summary_row["total_requests"] or 0,
-                "total_cost": float(summary_row["total_cost"] or 0),
-                "avg_latency_ms": float(summary_row["avg_latency_ms"]) if summary_row["avg_latency_ms"] else None
-            }
-            
-            return UsageResponse(
-                period=period,
-                agent_id=agent_id,
-                data=data,
-                summary=summary
-            )
+            params.append(agent_id)
+        
+        # Main aggregation query using TimescaleDB time_bucket
+        bucket_query = f"""
+            SELECT 
+                time_bucket('{time_bucket}', timestamp) AS bucket,
+                SUM(total_tokens) AS total_tokens,
+                SUM(prompt_tokens) AS prompt_tokens,
+                SUM(completion_tokens) AS completion_tokens,
+                COUNT(*) AS request_count,
+                SUM(total_cost) AS total_cost,
+                AVG(latency_ms) AS avg_latency_ms
+            FROM api_requests
+            WHERE timestamp >= $1
+            {agent_filter}
+            GROUP BY bucket
+            ORDER BY bucket ASC
+        """
+        
+        summary_query = f"""
+            SELECT 
+                SUM(total_tokens) AS total_tokens,
+                SUM(prompt_tokens) AS total_prompt_tokens,
+                SUM(completion_tokens) AS total_completion_tokens,
+                COUNT(*) AS total_requests,
+                SUM(total_cost) AS total_cost,
+                AVG(latency_ms) AS avg_latency_ms
+            FROM api_requests
+            WHERE timestamp >= $1
+            {agent_filter}
+        """
+        
+        async def _fetch_buckets():
+            async with pool.acquire() as conn:
+                return await conn.fetch(bucket_query, *params)
+
+        async def _fetch_summary():
+            async with pool.acquire() as conn:
+                return await conn.fetchrow(summary_query, *params)
+
+        rows, summary_row = await asyncio.gather(
+            _fetch_buckets(),
+            _fetch_summary(),
+        )
+        
+        data = []
+        for row in rows:
+            data.append(UsageDataPoint(
+                timestamp=row["bucket"].isoformat(),
+                total_tokens=row["total_tokens"] or 0,
+                prompt_tokens=row["prompt_tokens"] or 0,
+                completion_tokens=row["completion_tokens"] or 0,
+                request_count=row["request_count"] or 0,
+                total_cost=float(row["total_cost"] or 0),
+                avg_latency_ms=float(row["avg_latency_ms"]) if row["avg_latency_ms"] else None
+            ))
+        
+        summary = {
+            "total_tokens": summary_row["total_tokens"] or 0,
+            "total_prompt_tokens": summary_row["total_prompt_tokens"] or 0,
+            "total_completion_tokens": summary_row["total_completion_tokens"] or 0,
+            "total_requests": summary_row["total_requests"] or 0,
+            "total_cost": float(summary_row["total_cost"] or 0),
+            "avg_latency_ms": float(summary_row["avg_latency_ms"]) if summary_row["avg_latency_ms"] else None
+        }
+        
+        result = UsageResponse(
+            period=period,
+            agent_id=agent_id,
+            data=data,
+            summary=summary
+        )
+        _cache_set(cache_key, result)
+        return result
             
     except Exception as e:
         logger.error(f"Failed to get usage data: {e}")
@@ -1170,14 +1205,14 @@ async def get_agents_list(
                     FROM api_requests r
                     JOIN sessions sess ON r.session_id = sess.session_id
                     JOIN agents ag ON sess.agent_name = ag.agent_name
-                    WHERE r.timestamp >= NOW() - INTERVAL '%s days'
+                    WHERE r.timestamp >= NOW() - make_interval(days => $1)
                     GROUP BY ag.agent_id
                 ) s ON a.agent_id = s.agent_id
                 ORDER BY COALESCE(s.total_tokens, 0) DESC
                 LIMIT 100
-            """ % days
+            """
             
-            rows = await conn.fetch(query)
+            rows = await conn.fetch(query, days)
             return [
                 AgentMetrics(
                     agent_id=row["agent_id"],
@@ -1213,13 +1248,13 @@ async def get_models_list(
                     SUM(total_cost) AS total_cost,
                     AVG(latency_ms) AS avg_latency_ms
                 FROM api_requests
-                WHERE timestamp >= NOW() - INTERVAL '%s days'
+                WHERE timestamp >= NOW() - make_interval(days => $1)
                 GROUP BY provider, model
                 ORDER BY total_tokens DESC
                 LIMIT 100
-            """ % days
+            """
             
-            rows = await conn.fetch(query)
+            rows = await conn.fetch(query, days)
             model_metrics: List[ModelMetrics] = []
             for row in rows:
                 avg_latency_ms = float(row["avg_latency_ms"]) if row["avg_latency_ms"] else None
@@ -1265,12 +1300,12 @@ async def get_hourly_usage(
                     SUM(total_cost) AS total_cost,
                     AVG(latency_ms) AS avg_latency_ms
                 FROM api_requests
-                WHERE timestamp >= NOW() - INTERVAL '%s hours'
+                WHERE timestamp >= NOW() - make_interval(hours => $1)
                 GROUP BY date_trunc('hour', timestamp), provider, model
                 ORDER BY hour DESC
-            """ % hours
+            """
             
-            rows = await conn.fetch(query)
+            rows = await conn.fetch(query, hours)
             return [
                 HourlyUsage(
                     hour=row["hour"].isoformat(),

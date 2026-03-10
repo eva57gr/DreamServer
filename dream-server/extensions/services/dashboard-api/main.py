@@ -25,6 +25,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 # --- Local modules ---
 from config import SERVICES, INSTALL_DIR, DATA_DIR, SIDEBAR_ICONS
@@ -83,6 +84,8 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
 )
+
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # --- Include Routers ---
 

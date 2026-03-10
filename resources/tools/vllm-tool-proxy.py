@@ -269,7 +269,8 @@ def forward_with_body_and_fix(url, headers, body):
             resp_json = resp.json()
             if body and has_tools(body): extract_tools_from_content(resp_json)  # Only when tools present
             clean_response_for_openclaw(resp_json)
-            logger.info("RESPONSE: " + json.dumps({"c": str((resp_json.get("choices") or [{}])[0].get("message",{}).get("content"))[:200], "r": str((resp_json.get("choices") or [{}])[0].get("message",{}).get("reasoning",""))[:100], "f": (resp_json.get("choices") or [{}])[0].get("finish_reason"), "s": resp.status_code}))
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("RESPONSE: " + json.dumps({"c": str((resp_json.get("choices") or [{}])[0].get("message",{}).get("content"))[:200], "r": str((resp_json.get("choices") or [{}])[0].get("message",{}).get("reasoning",""))[:100], "f": (resp_json.get("choices") or [{}])[0].get("finish_reason"), "s": resp.status_code}))
             return Response(
                 json.dumps(resp_json),
                 status=resp.status_code,

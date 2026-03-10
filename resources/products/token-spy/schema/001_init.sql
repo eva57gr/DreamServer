@@ -66,6 +66,10 @@ CREATE INDEX IF NOT EXISTS idx_api_requests_model ON api_requests (model, timest
 CREATE INDEX IF NOT EXISTS idx_api_requests_api_key ON api_requests (api_key_prefix, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_api_requests_tenant ON api_requests (tenant_id, timestamp DESC);
 
+-- Composite indexes for dashboard aggregation queries
+CREATE INDEX IF NOT EXISTS idx_api_requests_timestamp_only ON api_requests (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_api_requests_provider_model ON api_requests (provider, model, timestamp DESC);
+
 -- ============================================
 -- Session tracking
 -- ============================================
@@ -84,6 +88,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions (started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions (agent_name, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_agent_sid ON sessions (agent_name, session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions (last_activity DESC) WHERE ended_at IS NULL;
 
 -- ============================================
 -- Agents registry

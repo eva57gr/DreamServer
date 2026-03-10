@@ -18,6 +18,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, Security
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -261,6 +262,8 @@ async def verify_api_key(
 # ── App ──────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Token Spy — API Monitor", docs_url=None, redoc_url=None)
+
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Anthropic upstream client (for /v1/messages)
 _anthropic_client: httpx.AsyncClient | None = None

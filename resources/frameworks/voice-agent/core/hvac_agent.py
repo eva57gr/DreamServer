@@ -461,20 +461,20 @@ async def save_audio_recording(call_data: CallData) -> Optional[str]:
 
 
 async def transcribe_audio_file(filepath: str) -> Optional[str]:
-    """Send audio file to Whisper for transcription"""
+    """Send audio file to Whisper for transcription (non-blocking)."""
     try:
-        with open(filepath, 'rb') as f:
-            audio_data = f.read()
+        stt_url = os.getenv("STT_BASE_URL", "http://localhost:9101/v1") + "/audio/transcriptions"
+        filename = os.path.basename(filepath)
 
-        resp = requests.post(
-            os.getenv("STT_BASE_URL", "http://localhost:9101/v1") + "/audio/transcriptions",
-            files={"file": (os.path.basename(filepath), audio_data, "audio/wav")},
-            data={"model": "Systran/faster-whisper-large-v3"},
-            timeout=300  # 5 minutes for long recordings
-        )
-        resp.raise_for_status()
-        result = resp.json()
-        return result.get("text", "")
+        async with aiohttp.ClientSession() as session:
+            data = aiohttp.FormData()
+            data.add_field("file", open(filepath, "rb"), filename=filename, content_type="audio/wav")
+            data.add_field("model", "Systran/faster-whisper-large-v3")
+
+            async with session.post(stt_url, data=data, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                resp.raise_for_status()
+                result = await resp.json()
+                return result.get("text", "")
     except Exception as e:
         print(f"Audio transcription failed: {e}")
         return None

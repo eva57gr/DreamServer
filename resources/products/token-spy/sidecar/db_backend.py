@@ -17,6 +17,7 @@ from contextlib import contextmanager
 
 try:
     import psycopg2
+    from psycopg2 import sql as psycopg2_sql
     from psycopg2.extras import RealDictCursor
     from psycopg2.pool import ThreadedConnectionPool
     POSTGRES_AVAILABLE = True
@@ -501,9 +502,11 @@ class DatabaseBackend:
                     conditions.append("model = %s")
                     params.append(model)
                 
-                where_clause = " AND ".join(conditions)
+                where_clause = psycopg2_sql.SQL(" AND ").join(
+                    psycopg2_sql.SQL(c) for c in conditions
+                )
                 
-                cur.execute(f"""
+                cur.execute(psycopg2_sql.SQL("""
                     SELECT 
                         COUNT(*) as total_requests,
                         COALESCE(SUM(prompt_tokens), 0) as total_prompt_tokens,
@@ -512,8 +515,8 @@ class DatabaseBackend:
                         COALESCE(SUM(total_cost), 0) as total_cost,
                         AVG(latency_ms) as avg_latency_ms
                     FROM api_requests
-                    WHERE {where_clause}
-                """, params)
+                    WHERE {}
+                """).format(where_clause), params)
                 
                 row = cur.fetchone()
                 

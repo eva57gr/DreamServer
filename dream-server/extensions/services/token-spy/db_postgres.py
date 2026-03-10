@@ -6,6 +6,7 @@ Set DB_BACKEND=postgres to use this module.
 
 import os
 import logging
+import threading
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID, uuid4
@@ -35,6 +36,8 @@ SINGLE_TENANT_SLUG = os.environ.get("SINGLE_TENANT_SLUG", "default")
 _pool: Optional[pool.ThreadedConnectionPool] = None
 _tenant_id: Optional[UUID] = None
 _agent_cache: dict[str, UUID] = {}
+_init_lock = threading.Lock()
+_initialized = False
 
 
 def _get_pool() -> pool.ThreadedConnectionPool:
@@ -64,38 +67,48 @@ def _put_conn(conn):
 
 
 def init_db():
-    """Initialize database (ensure tenant exists for single-tenant mode)."""
-    global _tenant_id
+    """Initialize database (ensure tenant exists for single-tenant mode).
     
-    conn = _get_conn()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # Check if tenant exists
-            cur.execute(
-                "SELECT id FROM tenants WHERE slug = %s AND deleted_at IS NULL",
-                (SINGLE_TENANT_SLUG,)
-            )
-            row = cur.fetchone()
-            
-            if row:
-                _tenant_id = row["id"]
-                logger.info(f"Using existing tenant: {SINGLE_TENANT_SLUG} ({_tenant_id})")
-            else:
-                # Create the default tenant
+    Thread-safe: only the first caller performs initialization; concurrent
+    callers block until it completes, then return immediately.
+    """
+    global _tenant_id, _initialized
+    
+    if _initialized:
+        return
+
+    with _init_lock:
+        if _initialized:
+            return
+
+        conn = _get_conn()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
-                    """
-                    INSERT INTO tenants (name, slug, plan)
-                    VALUES (%s, %s, 'free')
-                    RETURNING id
-                    """,
-                    (SINGLE_TENANT_SLUG.replace("-", " ").title(), SINGLE_TENANT_SLUG)
+                    "SELECT id FROM tenants WHERE slug = %s AND deleted_at IS NULL",
+                    (SINGLE_TENANT_SLUG,)
                 )
-                _tenant_id = cur.fetchone()["id"]
-                logger.info(f"Created tenant: {SINGLE_TENANT_SLUG} ({_tenant_id})")
-            
-            conn.commit()
-    finally:
-        _put_conn(conn)
+                row = cur.fetchone()
+
+                if row:
+                    _tenant_id = row["id"]
+                    logger.info(f"Using existing tenant: {SINGLE_TENANT_SLUG} ({_tenant_id})")
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO tenants (name, slug, plan)
+                        VALUES (%s, %s, 'free')
+                        RETURNING id
+                        """,
+                        (SINGLE_TENANT_SLUG.replace("-", " ").title(), SINGLE_TENANT_SLUG)
+                    )
+                    _tenant_id = cur.fetchone()["id"]
+                    logger.info(f"Created tenant: {SINGLE_TENANT_SLUG} ({_tenant_id})")
+
+                conn.commit()
+                _initialized = True
+        finally:
+            _put_conn(conn)
 
 
 def _get_or_create_agent(agent_name: str) -> UUID:
@@ -144,7 +157,7 @@ def _get_or_create_agent(agent_name: str) -> UUID:
 
 def log_usage(entry: dict):
     """Log a single request's usage metrics."""
-    if _tenant_id is None:
+    if not _initialized:
         init_db()
     
     agent_name = entry.get("agent", "unknown")
@@ -233,7 +246,7 @@ def _detect_provider(model: str) -> str:
 
 def query_usage(agent: str | None = None, hours: int = 24, limit: int = 200) -> list[dict]:
     """Query recent usage records."""
-    if _tenant_id is None:
+    if not _initialized:
         init_db()
     
     conn = _get_conn()
@@ -287,7 +300,7 @@ def query_usage(agent: str | None = None, hours: int = 24, limit: int = 200) -> 
 
 def query_summary(hours: int = 24) -> list[dict]:
     """Get summary metrics grouped by agent."""
-    if _tenant_id is None:
+    if not _initialized:
         init_db()
     
     conn = _get_conn()
@@ -340,7 +353,7 @@ def query_session_status(agent: str, char_limit: int = 200_000) -> dict:
     Detects session boundaries by looking for sudden drops in conversation_history_chars
     (indicating a session reset). Returns metrics for the current session.
     """
-    if _tenant_id is None:
+    if not _initialized:
         init_db()
     
     conn = _get_conn()

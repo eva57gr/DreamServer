@@ -2,9 +2,13 @@
 
 # Dream Server
 
-### One command to a fully local AI stack.
+### Own your AI. One person, one dream, one machine at a time.
 
-**LLM inference, chat UI, voice agents, workflow automation, RAG, image generation, and privacy tools — all running on your hardware. No cloud. No subscriptions. No configuration.**
+A handful of companies control the vast majority of global AI traffic — and with it, your data, your costs, and your uptime. Every query you send to a centralized provider is business intelligence you don’t own, running on infrastructure you don’t control, priced on terms you can’t negotiate.
+
+If AI is becoming critical infrastructure, it shouldn’t be rented. Self-hosting local AI should be a sovereign human right, not a career choice.
+
+**Dream Server is the exit.** A fully local AI stack — LLM inference, chat, voice, agents, workflows, RAG, image generation, and privacy tools — deployed on your hardware with a single command. No cloud. No subscriptions. No one watching.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/Light-Heart-Labs/DreamServer)](https://github.com/Light-Heart-Labs/DreamServer/stargazers)
@@ -40,7 +44,9 @@
 
 ## Why Dream Server?
 
-Setting up local AI usually means stitching together a dozen projects, debugging CUDA drivers, writing Docker configs, and hoping everything talks to each other. Dream Server replaces all of that with a single installer.
+Technology was made to empower people — not to concentrate power. Dream Server exists because we believe access to AI should come with full control over your data, your privacy, and your costs.
+
+The practical problem is real too: setting up local AI usually means stitching together a dozen projects, debugging CUDA drivers, writing Docker configs, and hoping everything talks to each other. Dream Server replaces all of that.
 
 - **Run one command** — the installer detects your GPU, picks the right model for your hardware, generates secure credentials, and launches everything
 - **Chat in under 2 minutes** — bootstrap mode starts a small model instantly while your full model downloads in the background
@@ -282,6 +288,7 @@ dream preset load gaming    # Restore it
 
 | | Dream Server | Ollama + Open WebUI | LocalAI |
 |---|:---:|:---:|:---:|
+| **Built for** | Sovereign local AI ownership | Running a model locally | Running a model locally |
 | One-command full-stack install | LLM + agents + workflows + RAG + voice + images | LLM + chat only | LLM only |
 | Hardware auto-detect + model selection | NVIDIA + AMD Strix Halo | No | No |
 | AMD APU unified memory support | ROCm + llama-server | Partial (Vulkan) | No |

@@ -10,9 +10,7 @@ import threading
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID, uuid4
-from datetime import datetime, timezone
 
-import psycopg2
 from psycopg2.extras import RealDictCursor, register_uuid
 from psycopg2 import pool
 
@@ -67,70 +65,56 @@ def _put_conn(conn):
 
 
 def init_db():
-    """Initialize database (ensure tenant exists for single-tenant mode).
-    
-    Thread-safe: only the first caller performs initialization; concurrent
-    callers block until it completes, then return immediately.
-    """
-    global _tenant_id, _initialized
-    
-    if _initialized:
-        return
+    """Initialize database (ensure tenant exists for single-tenant mode)."""
+    global _tenant_id
 
-    with _init_lock:
-        if _initialized:
-            return
+    conn = _get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Check if tenant exists
+            cur.execute(
+                "SELECT id FROM tenants WHERE slug = %s AND deleted_at IS NULL",
+                (SINGLE_TENANT_SLUG,)
+            )
+            row = cur.fetchone()
 
-        conn = _get_conn()
-        try:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if row:
+                _tenant_id = row["id"]
+                logger.info(f"Using existing tenant: {SINGLE_TENANT_SLUG} ({_tenant_id})")
+            else:
+                # Create the default tenant
                 cur.execute(
                     "SELECT id FROM tenants WHERE slug = %s AND deleted_at IS NULL",
                     (SINGLE_TENANT_SLUG,)
                 )
-                row = cur.fetchone()
+                _tenant_id = cur.fetchone()["id"]
+                logger.info(f"Created tenant: {SINGLE_TENANT_SLUG} ({_tenant_id})")
 
-                if row:
-                    _tenant_id = row["id"]
-                    logger.info(f"Using existing tenant: {SINGLE_TENANT_SLUG} ({_tenant_id})")
-                else:
-                    cur.execute(
-                        """
-                        INSERT INTO tenants (name, slug, plan)
-                        VALUES (%s, %s, 'free')
-                        RETURNING id
-                        """,
-                        (SINGLE_TENANT_SLUG.replace("-", " ").title(), SINGLE_TENANT_SLUG)
-                    )
-                    _tenant_id = cur.fetchone()["id"]
-                    logger.info(f"Created tenant: {SINGLE_TENANT_SLUG} ({_tenant_id})")
-
-                conn.commit()
-                _initialized = True
-        finally:
-            _put_conn(conn)
+            conn.commit()
+    finally:
+        _put_conn(conn)
 
 
 def _get_or_create_agent(agent_name: str) -> UUID:
     """Get or create an agent by name (within the current tenant)."""
     global _agent_cache
-    
+
     if agent_name in _agent_cache:
         return _agent_cache[agent_name]
-    
+
     conn = _get_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Bypass RLS for this query
             cur.execute("SET LOCAL app.current_tenant = %s", (str(_tenant_id),))
-            
+
             slug = agent_name.lower().replace(" ", "-")
             cur.execute(
                 "SELECT id FROM agents WHERE tenant_id = %s AND slug = %s",
                 (_tenant_id, slug)
             )
             row = cur.fetchone()
-            
+
             if row:
                 agent_id = row["id"]
             else:
@@ -144,7 +128,7 @@ def _get_or_create_agent(agent_name: str) -> UUID:
                 )
                 agent_id = cur.fetchone()["id"]
                 logger.info(f"Created agent: {agent_name} ({agent_id})")
-            
+
             conn.commit()
             _agent_cache[agent_name] = agent_id
             return agent_id
@@ -159,16 +143,16 @@ def log_usage(entry: dict):
     """Log a single request's usage metrics."""
     if not _initialized:
         init_db()
-    
+
     agent_name = entry.get("agent", "unknown")
     agent_id = _get_or_create_agent(agent_name)
-    
+
     # Map SQLite entry format to PostgreSQL schema
     conn = _get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute("SET LOCAL app.current_tenant = %s", (str(_tenant_id),))
-            
+
             cur.execute(
                 """
                 INSERT INTO requests (
@@ -248,14 +232,14 @@ def query_usage(agent: str | None = None, hours: int = 24, limit: int = 200) -> 
     """Query recent usage records."""
     if not _initialized:
         init_db()
-    
+
     conn = _get_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SET LOCAL app.current_tenant = %s", (str(_tenant_id),))
-            
+
             sql = """
-                SELECT 
+                SELECT
                     r.id, r.timestamp, a.name as agent, r.model,
                     r.request_body_bytes, r.message_count, r.user_message_count,
                     r.assistant_message_count, r.tool_count,
@@ -273,17 +257,17 @@ def query_usage(agent: str | None = None, hours: int = 24, limit: int = 200) -> 
                 AND r.timestamp > NOW() - INTERVAL '%s hours'
             """
             params = [_tenant_id, hours]
-            
+
             if agent:
                 sql += " AND a.name = %s"
                 params.append(agent)
-            
+
             sql += " ORDER BY r.timestamp DESC LIMIT %s"
             params.append(limit)
-            
+
             cur.execute(sql, params)
             rows = cur.fetchall()
-            
+
             # Convert timestamps to ISO format strings for compatibility
             result = []
             for row in rows:
@@ -302,12 +286,12 @@ def query_summary(hours: int = 24) -> list[dict]:
     """Get summary metrics grouped by agent."""
     if not _initialized:
         init_db()
-    
+
     conn = _get_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SET LOCAL app.current_tenant = %s", (str(_tenant_id),))
-            
+
             cur.execute(
                 """
                 SELECT
@@ -333,7 +317,7 @@ def query_summary(hours: int = 24) -> list[dict]:
                 (_tenant_id, hours)
             )
             rows = cur.fetchall()
-            
+
             # Convert Decimals to floats for JSON compatibility
             result = []
             for row in rows:
@@ -355,20 +339,20 @@ def query_session_status(agent: str, char_limit: int = 200_000) -> dict:
     """
     if not _initialized:
         init_db()
-    
+
     conn = _get_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SET LOCAL app.current_tenant = %s", (str(_tenant_id),))
-            
+
             # Get all recent turns for this agent, ordered chronologically
             cur.execute(
                 """
-                SELECT 
-                    r.conversation_history_chars, 
-                    r.cache_read_tokens, 
+                SELECT
+                    r.conversation_history_chars,
+                    r.cache_read_tokens,
                     r.cache_write_tokens,
-                    r.estimated_cost_usd, 
+                    r.estimated_cost_usd,
                     r.timestamp
                 FROM requests r
                 LEFT JOIN agents a ON r.agent_id = a.id
@@ -451,7 +435,7 @@ def query_recent_events(limit: int = 100, after_id: Optional[UUID] = None):
             if after_id:
                 cur.execute(
                     """
-                    SELECT 
+                    SELECT
                         r.id,
                         r.request_id as session_id,
                         r.model,
@@ -474,7 +458,7 @@ def query_recent_events(limit: int = 100, after_id: Optional[UUID] = None):
             else:
                 cur.execute(
                     """
-                    SELECT 
+                    SELECT
                         r.id,
                         r.request_id as session_id,
                         r.model,

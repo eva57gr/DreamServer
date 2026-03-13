@@ -196,29 +196,40 @@ grep -A 2 "Qwen3-8B" installers/lib/tier-map.sh | grep GGUF_SHA256
 
 ### Network Timeout Hardening
 
-All network operations (downloads, health checks, API calls) include timeout protection to prevent indefinite hangs:
+All network operations (downloads, health checks, API calls) include timeout protection to prevent indefinite hangs.
 
-**Timeout values:**
-- **Health checks**: 10 seconds — quick fail for unavailable services
-- **Script downloads**: 300 seconds (5 min) — Docker, NVIDIA repos, NodeSource, OpenCode installers
-- **Repository metadata**: 60 seconds (1 min) — package repository lists and GPG keys
-- **Model downloads**: 300-600 seconds — GGUF models (with resume support), FLUX models
-- **Embeddings downloads**: 600 seconds (10 min) — larger embedding models
+**Important semantic note:**
+- `curl --max-time` is a **total wall-clock timeout** for the entire request.
+- `wget --timeout/--read-timeout` are **per-connection / idle (no-progress) timeouts**.
+
+Because of this difference, **large model downloads must not use a low `curl --max-time`**, or they will abort on slow-but-progressing links.
+
+**Timeout policy:**
+- **Health checks / small API calls**: use `curl --connect-timeout` + `--max-time` (short total timeout)
+- **Script downloads / small metadata**: use `curl --connect-timeout` + `--max-time` (bounded total time)
+- **Large model downloads**: fail fast on unreachable servers, and fail on *stalled* transfers, but do **not** impose a low total wall-clock cap
 
 **Why this matters:**
 - Prevents installer hangs on slow/unresponsive networks
+- Keeps slow-but-progressing multi-GB downloads running
 - Provides predictable failure modes instead of indefinite blocking
-- Closes potential DoS vector from malicious or misconfigured remote servers
-- Improves user experience with clear timeout errors
 
-**Implementation:**
+**Examples:**
 ```bash
-# curl with timeout
-curl -fsSL --max-time 300 https://get.docker.com -o script.sh
+# Health check (total timeout is OK)
+curl -fsS --connect-timeout 3 --max-time 10 http://localhost:8080/health
 
-# wget with timeout
-wget -c -q --timeout=300 -O model.gguf https://example.com/model.gguf
+# Script download (bounded total timeout is OK)
+curl -fsSL --connect-timeout 10 --max-time 300 https://get.docker.com -o script.sh
+
+# Large download (stall detection; no low total max-time)
+# - speed-limit/time = "consider it stalled if below 10KiB/s for 30s"
+curl -C - -L --progress-bar --connect-timeout 10 \
+  --speed-time 30 --speed-limit 10240 \
+  -o model.gguf.part https://example.com/model.gguf
 ```
+
+On Linux, `wget -c` with `--timeout`/`--read-timeout` provides similar stall protection semantics for large downloads.
 
 All timeout values are tuned for typical network conditions while allowing for slower connections.
 

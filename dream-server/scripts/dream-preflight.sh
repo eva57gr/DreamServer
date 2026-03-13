@@ -73,8 +73,10 @@ else
 fi
 
 # Check llama-server health
+CURL_HEALTH_FLAGS=(--connect-timeout 3 --max-time 10)
+
 echo -n "llama-server API (port $LLM_PORT)... "
-if curl -sf "http://localhost:${LLM_PORT}${LLM_HEALTH}" >/dev/null 2>&1; then
+if curl -sf "${CURL_HEALTH_FLAGS[@]}" "http://localhost:${LLM_PORT}${LLM_HEALTH}" >/dev/null 2>&1; then
     echo -e "${GREEN}✓ healthy${NC}"
 else
     echo -e "${YELLOW}⚠ starting up${NC}"
@@ -84,7 +86,7 @@ fi
 
 # Check WebUI
 echo -n "Open WebUI (port $WEBUI_PORT)... "
-if curl -sf "http://localhost:${WEBUI_PORT}${WEBUI_HEALTH}" >/dev/null 2>&1; then
+if curl -sf "${CURL_HEALTH_FLAGS[@]}" "http://localhost:${WEBUI_PORT}${WEBUI_HEALTH}" >/dev/null 2>&1; then
     echo -e "${GREEN}✓ accessible${NC}"
 else
     echo -e "${YELLOW}⚠ not ready${NC}"
@@ -111,7 +113,7 @@ for sid in "${SERVICE_IDS[@]}"; do
     [[ "$port" == "0" ]] && continue
 
     echo -n "$name (port $port)... "
-    if curl -sf "http://localhost:${port}${health}" >/dev/null 2>&1; then
+    if curl -sf "${CURL_HEALTH_FLAGS[@]}" "http://localhost:${port}${health}" >/dev/null 2>&1; then
         echo -e "${GREEN}✓ ready${NC}"
     else
         echo -e "${YELLOW}⚠ not ready${NC}"

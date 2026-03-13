@@ -56,7 +56,7 @@ test_file_has_timeout() {
         local line_content=$(echo "$line" | cut -d: -f2-)
 
         # Check if timeout is on the same line (use grep -F for fixed string)
-        if echo "$line_content" | grep -qF "$timeout_pattern"; then
+        if echo "$line_content" | grep -qF -- "$timeout_pattern"; then
             has_timeout=true
             break
         fi
@@ -65,7 +65,7 @@ test_file_has_timeout() {
         for offset in 1 2; do
             local check_line=$((line_num + offset))
             local next_line=$(sed -n "${check_line}p" "$file" 2>/dev/null || true)
-            if echo "$next_line" | grep -qF "$timeout_pattern"; then
+            if echo "$next_line" | grep -qF -- "$timeout_pattern"; then
                 has_timeout=true
                 break 2
             fi
@@ -74,10 +74,10 @@ test_file_has_timeout() {
 
     if $has_timeout; then
         echo -e "${GREEN}✓ PASS${NC}"
-        ((PASSED++))
+        PASSED=$((PASSED + 1))
     else
         echo -e "${RED}✗ FAIL${NC}"
-        ((FAILED++))
+        FAILED=$((FAILED + 1))
         echo "     Missing timeout in: $file"
         echo "     Pattern: $pattern"
     fi
@@ -180,17 +180,20 @@ echo "2. Management Scripts"
 echo "─────────────────────"
 
 # dream-preflight.sh
+# dream-preflight.sh
+# Note: this script centralizes curl flags in CURL_HEALTH_FLAGS, so the timeout
+# flags may not appear on the same line as the curl invocation.
 test_file_has_timeout \
     "$ROOT_DIR/scripts/dream-preflight.sh" \
-    "curl.*LLM_PORT.*LLM_HEALTH" \
-    "--max-time" \
-    "Preflight LLM health check"
+    "CURL_HEALTH_FLAGS=" \
+    "--connect-timeout" \
+    "Preflight defines connect timeout"
 
 test_file_has_timeout \
     "$ROOT_DIR/scripts/dream-preflight.sh" \
-    "curl.*WEBUI_PORT.*WEBUI_HEALTH" \
+    "CURL_HEALTH_FLAGS=" \
     "--max-time" \
-    "Preflight WebUI health check"
+    "Preflight defines total timeout"
 
 # validate.sh
 test_file_has_timeout \

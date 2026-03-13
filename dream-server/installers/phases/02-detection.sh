@@ -65,6 +65,7 @@ DISK_AVAIL=$(df -BG "$HOME" | tail -1 | awk '{print $4}' | tr -d 'G')
 log "Available disk: ${DISK_AVAIL}GB"
 
 # GPU Detection
+ai "Detecting GPU..."
 detect_gpu || true
 
 if [[ "${CAP_PROFILE_LOADED:-false}" == "true" ]]; then

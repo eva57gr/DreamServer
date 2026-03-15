@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import secrets
+import tempfile
 import time
 from pathlib import Path
 
@@ -169,10 +170,20 @@ def load_settings() -> dict:
 
 
 def save_settings(data: dict):
-    """Persist settings to disk."""
-    os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
-    with open(SETTINGS_PATH, "w") as f:
-        json.dump(data, f, indent=2)
+    """Persist settings to disk via atomic write (write to temp + rename)."""
+    settings_dir = os.path.dirname(SETTINGS_PATH)
+    os.makedirs(settings_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=settings_dir, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, SETTINGS_PATH)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def get_agent_setting(agent: str, key: str):
@@ -1004,6 +1015,7 @@ def _get_local_session_status(agent: str) -> dict:
         with open(largest) as f:
             lines = f.readlines()
     except Exception:
+        log.warning(f"[SESSION] Failed to read session file: {largest}")
         return None
 
     user_turns = 0
@@ -1030,7 +1042,7 @@ def _get_local_session_status(agent: str) -> dict:
                 elif isinstance(c, str):
                     history_chars += len(c)
         except Exception:
-            pass
+            pass  # skip malformed JSONL lines
 
     limit = get_agent_setting(agent, "session_char_limit") or AUTO_RESET_HISTORY_CHARS
     if tool_results >= 480:
@@ -1099,9 +1111,9 @@ def _get_local_accumulated_turns(agent: str) -> int:
                             elif role == "assistant":
                                 assistant_turns += 1
                     except Exception:
-                        pass
+                        pass  # skip malformed JSONL lines
         except Exception:
-            pass
+            log.warning(f"[SESSION] Failed to read session file: {fpath}")
     current_file_turns = user_turns if user_turns > 0 else assistant_turns
 
     # Persistent accumulator — survives session purge (250KB/24h cleanup)
@@ -1109,7 +1121,7 @@ def _get_local_accumulated_turns(agent: str) -> int:
     try:
         with open(acc_path) as f:
             acc = json.load(f)
-    except Exception:
+    except (FileNotFoundError, json.JSONDecodeError):
         acc = {"total": 0, "last_file_turns": 0}
 
     last_file_turns = acc.get("last_file_turns", 0)
@@ -1128,7 +1140,7 @@ def _get_local_accumulated_turns(agent: str) -> int:
         with open(acc_path, "w") as f:
             json.dump(acc, f)
     except Exception:
-        pass
+        log.warning(f"[SESSION] Failed to save accumulated turns for {agent}")
 
     return total
 
@@ -1146,8 +1158,8 @@ def _get_remote_session_status(agent: str) -> dict:
     sessions_dir = remote["sessions_dir"]
 
     script = (
-        "import json, os, glob\n"
-        f"sdir = \"{sessions_dir}\"\n"
+        "import json, os, glob, sys\n"
+        "sdir = sys.argv[1]\n"
         "files = sorted(glob.glob(os.path.join(sdir, '*.jsonl')), key=os.path.getmtime, reverse=True)\n"
         "if not files:\n"
         "    print(json.dumps({'turns': 0, 'chars': 0, 'files': 0}))\n"
@@ -1177,9 +1189,11 @@ def _get_remote_session_status(agent: str) -> dict:
         " 'file_bytes': os.path.getsize(largest), 'total_lines': len(lines), 'files': len(files)}))"
     )
     try:
+        import shlex
+        remote_cmd = f"python3 - {shlex.quote(sessions_dir)}"
         result = subprocess.run(
             ["ssh", "-o", "ConnectTimeout=3", "-o", "StrictHostKeyChecking=accept-new",
-             ssh_target, "python3", "-"],
+             ssh_target, remote_cmd],
             input=script, capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
@@ -1237,8 +1251,8 @@ def _kill_remote_session(agent: str, reason: str = "dashboard") -> dict:
     sessions_dir = remote["sessions_dir"]
 
     script = (
-        "import os, glob, json\n"
-        f"sdir = \"{sessions_dir}\"\n"
+        "import os, glob, json, sys\n"
+        "sdir = sys.argv[1]\n"
         "files = sorted(glob.glob(os.path.join(sdir, '*.jsonl')), key=os.path.getsize, reverse=True)\n"
         "if not files:\n"
         "    print(json.dumps({'action': 'none', 'reason': 'no sessions'}))\n"
@@ -1257,9 +1271,11 @@ def _kill_remote_session(agent: str, reason: str = "dashboard") -> dict:
         "    print(json.dumps({'action': 'killed', 'session_id': sid, 'size_bytes': size}))"
     )
     try:
+        import shlex
+        remote_cmd = f"python3 - {shlex.quote(sessions_dir)}"
         result = subprocess.run(
             ["ssh", "-o", "ConnectTimeout=3", "-o", "StrictHostKeyChecking=accept-new",
-             ssh_target, "python3", "-"],
+             ssh_target, remote_cmd],
             input=script, capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
@@ -1315,7 +1331,7 @@ def _kill_session(agent: str, reason: str = "manual") -> dict:
         with open(sessions_json, "w") as f:
             json.dump(data, f, indent=2)
     except Exception:
-        pass
+        log.warning(f"[RESET] Failed to clean sessions.json for {agent}")
 
     log.warning(f"[RESET] Killed session {largest} for {agent} ({size} bytes) — {reason}")
     return {"agent": agent, "action": "killed", "session_id": largest, "size_bytes": size}

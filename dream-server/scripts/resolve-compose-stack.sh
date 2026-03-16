@@ -134,8 +134,10 @@ if ext_dir.exists():
             if gpu_overlay.exists():
                 resolved.append(str(gpu_overlay.relative_to(script_dir)))
         except Exception as e:
-            print(f"WARNING: skipping {service_dir.name}: {e}", file=sys.stderr)
-            continue
+            print(f"ERROR: Failed to parse manifest for {service_dir.name}: {e}", file=sys.stderr)
+            print(f"  Manifest path: {manifest_path}", file=sys.stderr)
+            print(f"  This service will be skipped. Fix the manifest or disable the service.", file=sys.stderr)
+            sys.exit(1)
 
 # Include docker-compose.local.yml for local/hybrid mode (Linux GPU backends only)
 # This gates open-webui on llama-server health — not appropriate for cloud mode

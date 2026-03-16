@@ -179,6 +179,19 @@ fi
 # Resolve compose overlay files
 resolve_compose_config
 
+# Validate compose stack syntax before proceeding
+if [[ -n "${COMPOSE_FLAGS:-}" ]]; then
+    ai "Validating compose stack configuration..."
+    if "$SCRIPT_DIR/scripts/validate-compose-stack.sh" --compose-flags "$COMPOSE_FLAGS" --quiet >> "$LOG_FILE" 2>&1; then
+        ai_ok "Compose stack validated"
+    else
+        ai_bad "Compose stack validation failed"
+        ai "Check log file for details: $LOG_FILE"
+        ai "This usually means a service manifest or compose file has syntax errors."
+        exit 1
+    fi
+fi
+
 # Resolve tier → model/GGUF/context
 resolve_tier_config
 

@@ -23,6 +23,8 @@ if $DRY_RUN; then
     log "[DRY RUN] Would start services: $DOCKER_COMPOSE_CMD $COMPOSE_FLAGS up -d"
 else
     cd "$INSTALL_DIR"
+    # Convert COMPOSE_FLAGS string to array for safe word-splitting
+    read -ra COMPOSE_FLAGS_ARR <<< "$COMPOSE_FLAGS"
     mkdir -p "$INSTALL_DIR/logs"
 
     # Cloud mode: skip model downloads, auto-enable litellm
@@ -232,7 +234,7 @@ MODELS_INI_EOF
     ai "I'm bringing systems online. You can breathe."
     echo ""
     compose_ok=false
-    $DOCKER_COMPOSE_CMD $COMPOSE_FLAGS up --build -d >> "$LOG_FILE" 2>&1 &
+    $DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" up --build -d >> "$LOG_FILE" 2>&1 &
     compose_pid=$!
     if spin_task $compose_pid "Launching containers..."; then
         compose_ok=true
@@ -240,14 +242,14 @@ MODELS_INI_EOF
         printf "\r  ${AMB}⚠${NC} %-60s\n" "Some services still starting..."
         echo ""
         ai_warn "Some containers need more time. Retrying..."
-        $DOCKER_COMPOSE_CMD $COMPOSE_FLAGS up --build -d >> "$LOG_FILE" 2>&1 &
+        $DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" up --build -d >> "$LOG_FILE" 2>&1 &
         compose_pid=$!
         if spin_task $compose_pid "Waiting for remaining services..."; then
             compose_ok=true
         fi
     fi
     # Final safety net: start any containers stuck in Created state
-    $DOCKER_COMPOSE_CMD $COMPOSE_FLAGS up -d >> "$LOG_FILE" 2>&1 || true
+    $DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" up -d >> "$LOG_FILE" 2>&1 || true
 
     if $compose_ok; then
         printf "\r  ${BGRN}✓${NC} %-60s\n" "All containers launched"

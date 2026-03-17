@@ -11,8 +11,8 @@ services:
 
   dashboard-api:
     environment:
-      - OLLAMA_URL=http://host.docker.internal:8080
+      - OLLAMA_URL=http://host.docker.internal:${OLLAMA_PORT:-11434}
 
   open-webui:
     environment:
-      OPENAI_API_BASE_URL: "http://host.docker.internal:8080/v1"
+      OPENAI_API_BASE_URL: "http://host.docker.internal:${OLLAMA_PORT:-11434}/v1"

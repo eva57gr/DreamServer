@@ -109,11 +109,13 @@ function New-DreamEnv {
     $difySecretKey   = Get-EnvOrNew "DIFY_SECRET_KEY"    (New-SecureHex -Bytes 32)
 
     # Determine LLM API URL based on backend
+    $ollamaPort = Get-EnvOrNew "OLLAMA_PORT" "$($script:OLLAMA_PORT_DEFAULT)"
+
     # AMD on Windows: llama-server runs natively, containers reach it via host.docker.internal
     # NVIDIA: llama-server runs in Docker, containers reach it via service name
     # NOTE: $(if ...) syntax required for PS 5.1 compatibility
     $llmApiUrl = $(if ($GpuBackend -eq "amd") {
-        "http://host.docker.internal:8080"
+        "http://host.docker.internal:$ollamaPort"
     } elseif ($DreamMode -eq "cloud") {
         "http://litellm:4000"
     } else {
@@ -187,7 +189,7 @@ GPU_BACKEND=$GpuBackend
 $(if ($LlamaServerImage) { "LLAMA_SERVER_IMAGE=$LlamaServerImage" } else { "#LLAMA_SERVER_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda" })
 
 #=== Ports ===
-OLLAMA_PORT=8080
+OLLAMA_PORT=$ollamaPort
 WEBUI_PORT=3000
 WHISPER_PORT=9000
 TTS_PORT=8880
@@ -253,6 +255,7 @@ TIMEZONE=$tz
         SearxngSecret  = $searxngSecret
         OpenclawToken  = $openclawToken
         DashboardKey   = $dashboardApiKey
+        OllamaPort     = $ollamaPort
     }
 }
 
@@ -312,7 +315,7 @@ function New-OpenClawConfig {
         [int]$MaxContext,
         [string]$Token,
         [string]$ProviderName = "local-llama",
-        [string]$ProviderUrl  = "http://host.docker.internal:8080"
+        [string]$ProviderUrl  = "http://host.docker.internal:$($script:OLLAMA_PORT_DEFAULT)"
     )
 
     # Create directories

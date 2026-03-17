@@ -24,6 +24,7 @@ $script:DS_PREFLIGHT_REPORT = Join-Path $env:TEMP "dream-server-windows-prefligh
 $script:LLAMA_SERVER_DIR = Join-Path $script:DS_INSTALL_DIR "llama-server"
 $script:LLAMA_SERVER_EXE = Join-Path $script:LLAMA_SERVER_DIR "llama-server.exe"
 $script:LLAMA_SERVER_PID_FILE = Join-Path (Join-Path $script:DS_INSTALL_DIR "data") "llama-server.pid"
+$script:OLLAMA_PORT_DEFAULT = 11434
 
 # llama.cpp release for Vulkan build (update when new releases ship)
 $script:LLAMA_CPP_RELEASE_TAG = "b5570"

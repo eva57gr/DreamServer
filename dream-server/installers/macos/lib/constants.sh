@@ -24,6 +24,7 @@ LLAMA_SERVER_DIR="${DS_INSTALL_DIR}/bin"
 LLAMA_SERVER_BIN="${LLAMA_SERVER_DIR}/llama-server"
 LLAMA_SERVER_PID_FILE="${DS_INSTALL_DIR}/data/.llama-server.pid"
 LLAMA_SERVER_LOG="${DS_INSTALL_DIR}/data/llama-server.log"
+OLLAMA_PORT_DEFAULT=11434
 
 # llama.cpp release for macOS Metal build (update when new releases ship)
 LLAMA_CPP_RELEASE_TAG="b8210"

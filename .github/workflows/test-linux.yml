@@ -35,6 +35,7 @@ jobs:
         run: |
           bash tests/contracts/test-installer-contracts.sh
           bash tests/contracts/test-preflight-fixtures.sh
+          bash tests/contracts/test-platform-port-remediation.sh
 
       - name: Installer Simulation Harness
         run: |

@@ -329,9 +329,11 @@ if ($DryRun) {
     # Generate .env
     # NOTE: $(if ...) syntax required for PS 5.1 compatibility
     $dreamMode = $(if ($Cloud) { "cloud" } else { "local" })
+    $llamaPort = "$($script:OLLAMA_PORT_DEFAULT)"
     $envResult = New-DreamEnv -InstallDir $InstallDir -TierConfig $tierConfig `
         -Tier $selectedTier -GpuBackend $gpuInfo.Backend -DreamMode $dreamMode `
         -LlamaServerImage $llamaServerImage
+    if ($envResult.OllamaPort) { $llamaPort = "$($envResult.OllamaPort)" }
     Write-AISuccess "Generated .env with secure secrets"
 
     # Generate SearXNG config
@@ -341,7 +343,7 @@ if ($DryRun) {
     # Generate OpenClaw configs (if enabled)
     if ($enableOpenClaw) {
         $providerUrl = $(if ($gpuInfo.Backend -eq "amd") {
-            "http://host.docker.internal:8080"
+            "http://host.docker.internal:$llamaPort"
         } else {
             "http://llama-server:8080"
         })
@@ -371,7 +373,7 @@ if ($DryRun) {
     }
     if ($gpuInfo.Backend -eq "amd") {
         Write-AI "[DRY RUN] Would download llama-server.exe (Vulkan build)"
-        Write-AI "[DRY RUN] Would start native llama-server on port 8080"
+        Write-AI "[DRY RUN] Would start native llama-server on port $($script:OLLAMA_PORT_DEFAULT)"
     }
     Write-AI "[DRY RUN] Would run: docker compose up -d"
     if (-not $Cloud) {
@@ -476,7 +478,7 @@ if ($DryRun) {
             $llamaArgs = @(
                 "--model", $modelFullPath,
                 "--host", "0.0.0.0",
-                "--port", "8080",
+                "--port", "$llamaPort",
                 "--n-gpu-layers", "999",
                 "--ctx-size", "$($tierConfig.MaxContext)"
             )
@@ -496,7 +498,7 @@ if ($DryRun) {
                 Start-Sleep -Seconds 2
                 $waited += 2
                 try {
-                    $req = [System.Net.HttpWebRequest]::Create("http://localhost:8080/health")
+                    $req = [System.Net.HttpWebRequest]::Create("http://localhost:$llamaPort/health")
                     $req.Timeout = 3000
                     $req.Method = "GET"
                     $resp = $req.GetResponse()
@@ -684,8 +686,6 @@ if ($DryRun) {
                 New-Item -ItemType Directory -Path $script:OPENCODE_CONFIG_DIR -Force | Out-Null
                 $ocConfigFile = Join-Path $script:OPENCODE_CONFIG_DIR "opencode.json"
                 if (-not (Test-Path $ocConfigFile)) {
-                    # OLLAMA_PORT in .env is always 8080; AMD native also uses 8080
-                    $llamaPort = "8080"
                     # NOTE: llama-server exposes models by GGUF filename, not friendly name
                     $ocModelId = $tierConfig.GgufFile
                     $ocConfig = @"
@@ -773,8 +773,9 @@ if ($DryRun) {
 }
 
 # Health check loop
-# NOTE: OLLAMA_PORT is always 8080 in .env; both NVIDIA Docker and AMD native use 8080
-$llamaHealthPort = "8080"
+# OLLAMA_PORT is user-overridable in .env; use canonical default if missing.
+$llamaHealthPort = "$($script:OLLAMA_PORT_DEFAULT)"
+if ($envResult -and $envResult.OllamaPort) { $llamaHealthPort = "$($envResult.OllamaPort)" }
 $healthChecks = @(
     @{ Name = "LLM (llama-server)"; Url = "http://localhost:${llamaHealthPort}/health" }
     @{ Name = "Chat UI (Open WebUI)"; Url = "http://localhost:3000" }

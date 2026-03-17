@@ -4,7 +4,8 @@
 # ============================================================================
 # Standalone macOS Apple Silicon installer. Does not modify any existing files.
 #
-# macOS: llama-server runs natively with Metal on the host (port 8080).
+# macOS: llama-server runs natively with Metal on the host (OLLAMA_PORT,
+# default 11434).
 #        Everything else runs in Docker. Containers reach llama-server via
 #        host.docker.internal.
 #
@@ -68,6 +69,7 @@ source "${LIB_DIR}/env-generator.sh"
 
 # ── Resolve install directory ──
 INSTALL_DIR="${DS_INSTALL_DIR}"
+LLAMA_PORT_RUNTIME="${OLLAMA_PORT_DEFAULT:-11434}"
 
 # Initialize log file
 mkdir -p "$(dirname "$DS_LOG_FILE")"
@@ -127,7 +129,7 @@ ai_ok "Disk space OK"
 check_ollama_conflict
 if $OLLAMA_RUNNING; then
     ai_warn "Ollama is running (PID ${OLLAMA_PID}) and may conflict with Dream Server."
-    ai "  Both use port 11434/8080. Ollama will shadow llama-server."
+    ai "  Both use port ${OLLAMA_PORT_DEFAULT:-11434} by default. Ollama will shadow llama-server."
     if ! $NON_INTERACTIVE; then
         read -r -p "  Stop Ollama for this session? [Y/n] " ollama_choice
         if [[ ! "$ollama_choice" =~ ^[nN] ]]; then
@@ -311,6 +313,7 @@ else
 
     # Generate .env
     generate_dream_env "$INSTALL_DIR" "$SELECTED_TIER"
+    LLAMA_PORT_RUNTIME="${ENV_OLLAMA_PORT:-${OLLAMA_PORT_DEFAULT:-11434}}"
     ai_ok "Generated .env with secure secrets"
 
     # Generate SearXNG config
@@ -320,7 +323,7 @@ else
     # Generate OpenClaw configs (if enabled)
     if $ENABLE_OPENCLAW; then
         generate_openclaw_config "$INSTALL_DIR" "$LLM_MODEL" "$MAX_CONTEXT" \
-            "$ENV_OPENCLAW_TOKEN" "http://host.docker.internal:8080"
+            "$ENV_OPENCLAW_TOKEN" "http://host.docker.internal:${LLAMA_PORT_RUNTIME}"
         ai_ok "Generated OpenClaw configs"
     fi
 
@@ -339,7 +342,7 @@ show_phase 5 6 "LAUNCH" "2-30 minutes (model download)"
 if $DRY_RUN; then
     [[ -n "$GGUF_URL" ]] && ai "[DRY RUN] Would download: ${GGUF_FILE}"
     ai "[DRY RUN] Would download llama-server (Metal build)"
-    ai "[DRY RUN] Would start native llama-server on port 8080"
+    ai "[DRY RUN] Would start native llama-server on port ${OLLAMA_PORT_DEFAULT:-11434}"
     ai "[DRY RUN] Would run: docker compose up -d"
 else
     # Change to install directory for docker compose
@@ -484,7 +487,7 @@ else
         fi
 
         "$LLAMA_SERVER_BIN" \
-            --host 0.0.0.0 --port 8080 \
+            --host 0.0.0.0 --port "${LLAMA_PORT_RUNTIME}" \
             --model "$MODEL_FULL_PATH" \
             --ctx-size "$MAX_CONTEXT" \
             --n-gpu-layers 999 \
@@ -501,7 +504,7 @@ else
         while [[ "$WAITED" -lt "$MAX_WAIT" ]]; do
             sleep 2
             WAITED=$((WAITED + 2))
-            if curl -sf http://localhost:8080/health >/dev/null 2>&1; then
+            if curl -sf "http://localhost:${LLAMA_PORT_RUNTIME}/health" >/dev/null 2>&1; then
                 HEALTHY=true
                 break
             fi
@@ -639,7 +642,7 @@ else
         ai_ok "OpenCode already installed"
     fi
 
-    # Configure OpenCode to use local llama-server (native Metal, port 8080)
+    # Configure OpenCode to use local llama-server (native Metal)
     if [[ -x "$OPENCODE_BIN" ]]; then
         mkdir -p "$OPENCODE_CONFIG_DIR"
         if [[ ! -f "$OPENCODE_CONFIG_DIR/opencode.json" ]]; then
@@ -652,7 +655,7 @@ else
       "npm": "@ai-sdk/openai-compatible",
       "name": "llama-server (local)",
       "options": {
-        "baseURL": "http://127.0.0.1:8080/v1",
+        "baseURL": "http://127.0.0.1:${LLAMA_PORT_RUNTIME}/v1",
         "apiKey": "no-key"
       },
       "models": {
@@ -745,7 +748,7 @@ ALL_HEALTHY=true
 
 # Parallel arrays (Bash 3.2 compatible -- no associative arrays)
 HEALTH_NAMES=("LLM (llama-server)" "Chat UI (Open WebUI)")
-HEALTH_URLS=("http://localhost:8080/health" "http://localhost:3000")
+HEALTH_URLS=("http://localhost:${LLAMA_PORT_RUNTIME}/health" "http://localhost:3000")
 $ENABLE_VOICE && HEALTH_NAMES+=("Whisper (STT)") && HEALTH_URLS+=("http://localhost:9000/health")
 $ENABLE_WORKFLOWS && HEALTH_NAMES+=("n8n (Workflows)") && HEALTH_URLS+=("http://localhost:5678/healthz")
 [[ -x "$OPENCODE_BIN" ]] && HEALTH_NAMES+=("OpenCode (IDE)") && HEALTH_URLS+=("http://localhost:${OPENCODE_PORT}")

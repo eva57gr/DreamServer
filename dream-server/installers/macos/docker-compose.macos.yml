@@ -12,7 +12,7 @@ services:
 
   dashboard-api:
     environment:
-      - OLLAMA_URL=http://host.docker.internal:8080
+      - OLLAMA_URL=http://host.docker.internal:${OLLAMA_PORT:-11434}
       - OLLAMA_HOST=host.docker.internal
       # Override GPU_BACKEND so manifest filter discovers services.
       # gpu.py detection returns None gracefully (no nvidia-smi in Docker on Mac).
@@ -20,4 +20,4 @@ services:
 
   open-webui:
     environment:
-      OPENAI_API_BASE_URL: "http://host.docker.internal:8080/v1"
+      OPENAI_API_BASE_URL: "http://host.docker.internal:${OLLAMA_PORT:-11434}/v1"

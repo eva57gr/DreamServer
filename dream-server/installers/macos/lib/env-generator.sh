@@ -58,8 +58,9 @@ generate_dream_env() {
     openclaw_token=$(new_secure_hex 24)
     local searxng_secret
     searxng_secret=$(new_secure_hex 32)
+    local ollama_port="${OLLAMA_PORT_DEFAULT:-11434}"
     # macOS: llama-server runs natively, containers reach it via host.docker.internal
-    local llm_api_url="http://host.docker.internal:8080"
+    local llm_api_url="http://host.docker.internal:${ollama_port}"
 
     local tz
     tz=$(detect_timezone)
@@ -89,7 +90,7 @@ CTX_SIZE=${MAX_CONTEXT}
 GPU_BACKEND=apple
 
 #=== Ports ===
-OLLAMA_PORT=8080
+OLLAMA_PORT=${ollama_port}
 WEBUI_PORT=3000
 WHISPER_PORT=9000
 TTS_PORT=8880
@@ -137,6 +138,7 @@ ENVEOF
     ENV_SEARXNG_SECRET="$searxng_secret"
     ENV_OPENCLAW_TOKEN="$openclaw_token"
     ENV_DASHBOARD_KEY="$dashboard_api_key"
+    ENV_OLLAMA_PORT="$ollama_port"
 }
 
 generate_searxng_config() {
@@ -179,7 +181,7 @@ generate_openclaw_config() {
     local llm_model="$2"
     local max_context="$3"
     local token="$4"
-    local provider_url="${5:-http://host.docker.internal:8080}"
+    local provider_url="${5:-http://host.docker.internal:${OLLAMA_PORT_DEFAULT:-11434}}"
     local provider_name="local-llama"
 
     # Create directories

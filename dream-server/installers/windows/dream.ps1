@@ -135,6 +135,14 @@ function Read-DreamEnv {
     return $result
 }
 
+function Get-LlamaPort {
+    $envMap = Read-DreamEnv
+    if ($envMap.ContainsKey("OLLAMA_PORT") -and $envMap["OLLAMA_PORT"]) {
+        return [string]$envMap["OLLAMA_PORT"]
+    }
+    return [string]$script:OLLAMA_PORT_DEFAULT
+}
+
 # ── AMD native llama-server management ──
 
 function Get-NativeLlamaStatus {
@@ -157,7 +165,7 @@ function Get-NativeLlamaStatus {
 
             # Health check
             try {
-                $resp = Invoke-WebRequest -Uri "http://localhost:8080/health" `
+                $resp = Invoke-WebRequest -Uri "http://localhost:$(Get-LlamaPort)/health" `
                     -TimeoutSec 3 -UseBasicParsing -ErrorAction SilentlyContinue
                 if ($resp.StatusCode -eq 200) {
                     $result.Healthy = $true
@@ -206,7 +214,7 @@ function Start-NativeLlamaServer {
     $llamaArgs = @(
         "--model", $modelPath,
         "--host", "0.0.0.0",
-        "--port", "8080",
+        "--port", "$(Get-LlamaPort)",
         "--n-gpu-layers", "999",
         "--ctx-size", $ctxSize
     )
@@ -227,7 +235,7 @@ function Start-NativeLlamaServer {
         Start-Sleep -Seconds 2
         $waited += 2
         try {
-            $resp = Invoke-WebRequest -Uri "http://localhost:8080/health" `
+            $resp = Invoke-WebRequest -Uri "http://localhost:$(Get-LlamaPort)/health" `
                 -TimeoutSec 3 -UseBasicParsing -ErrorAction SilentlyContinue
             if ($resp.StatusCode -eq 200) {
                 Write-AISuccess "Native llama-server healthy"
@@ -291,7 +299,7 @@ function Invoke-Status {
         Write-Host ("  " + ("-" * 40)) -ForegroundColor DarkGray
 
         $endpoints = @(
-            @{ Name = "LLM API";    Url = "http://localhost:8080/health" }
+            @{ Name = "LLM API";    Url = "http://localhost:$(Get-LlamaPort)/health" }
             @{ Name = "Chat UI";    Url = "http://localhost:3000" }
             @{ Name = "Dashboard";  Url = "http://localhost:3001" }
         )
@@ -473,7 +481,7 @@ function Invoke-Chat {
     } | ConvertTo-Json -Depth 3
 
     try {
-        $resp = Invoke-RestMethod -Uri "http://localhost:8080/v1/chat/completions" `
+        $resp = Invoke-RestMethod -Uri "http://localhost:$(Get-LlamaPort)/v1/chat/completions" `
             -Method POST -Body $body -ContentType "application/json" -TimeoutSec 120
 
         if ($resp.choices -and $resp.choices[0].message) {

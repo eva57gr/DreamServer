@@ -94,6 +94,11 @@ read_dream_env() {
     done < "$env_file"
 }
 
+llama_port() {
+    read_dream_env
+    echo "${ENV_OLLAMA_PORT:-${OLLAMA_PORT_DEFAULT:-11434}}"
+}
+
 # ── Native llama-server management ──
 
 get_native_llama_status() {
@@ -114,7 +119,7 @@ get_native_llama_status() {
         NATIVE_LLAMA_PID="$saved_pid"
 
         # Health check
-        if curl -sf http://localhost:8080/health >/dev/null 2>&1; then
+        if curl -sf "http://localhost:$(llama_port)/health" >/dev/null 2>&1; then
             NATIVE_LLAMA_HEALTHY=true
         fi
     else
@@ -149,7 +154,7 @@ start_native_llama() {
     mkdir -p "$(dirname "$LLAMA_SERVER_PID_FILE")"
 
     "$LLAMA_SERVER_BIN" \
-        --host 0.0.0.0 --port 8080 \
+        --host 0.0.0.0 --port "$(llama_port)" \
         --model "$model_path" \
         --ctx-size "$ctx_size" \
         --n-gpu-layers 999 \
@@ -166,7 +171,7 @@ start_native_llama() {
     while [[ "$waited" -lt "$max_wait" ]]; do
         sleep 2
         waited=$((waited + 2))
-        if curl -sf http://localhost:8080/health >/dev/null 2>&1; then
+        if curl -sf "http://localhost:$(llama_port)/health" >/dev/null 2>&1; then
             ai_ok "Native llama-server healthy"
             return
         fi
@@ -234,7 +239,7 @@ cmd_status() {
 
     # Parallel arrays (Bash 3.2 compatible)
     local ep_names=("LLM API" "Chat UI" "Dashboard" "OpenCode (IDE)")
-    local ep_urls=("http://localhost:8080/health" "http://localhost:3000" "http://localhost:3001" "http://localhost:3003")
+    local ep_urls=("http://localhost:$(llama_port)/health" "http://localhost:3000" "http://localhost:3001" "http://localhost:3003")
 
     for ((i=0; i<${#ep_names[@]}; i++)); do
         local name="${ep_names[$i]}"
@@ -408,7 +413,7 @@ cmd_chat() {
         '{model: "default", messages: [{role: "user", content: $msg}], max_tokens: 500}')
 
     local response
-    response=$(curl -sf -X POST "http://localhost:8080/v1/chat/completions" \
+    response=$(curl -sf -X POST "http://localhost:$(llama_port)/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d "$payload" 2>/dev/null) || {
         ai_err "Chat request failed."

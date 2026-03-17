@@ -82,10 +82,19 @@ def _parse_script_json_output(raw: str) -> dict[str, Any] | None:
         return None
 
     try:
-        parsed = json.loads(payload)
-        if isinstance(parsed, dict):
-            return parsed
-    except json.JSONDecodeError:
+        req = urllib.request.Request("https://api.github.com/repos/Light-Heart-Labs/DreamServer/releases/latest", headers={"Accept": "application/vnd.github.v3+json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+            latest = data.get("tag_name", "").lstrip("v")
+            if latest:
+                result["latest"] = latest
+                result["changelog_url"] = data.get("html_url")
+                current_parts = [int(x) for x in current.split(".") if x.isdigit()][:3]
+                latest_parts = [int(x) for x in latest.split(".") if x.isdigit()][:3]
+                current_parts += [0] * (3 - len(current_parts))
+                latest_parts += [0] * (3 - len(latest_parts))
+                result["update_available"] = latest_parts > current_parts
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError, ValueError):
         pass
 
     # Tolerate wrappers/noise around JSON payload.
@@ -262,26 +271,16 @@ async def get_release_manifest():
     try:
         with urlopen(req, timeout=5) as resp:
             releases = json.loads(resp.read())
-        return {
-            "releases": [
-                {
-                    "version": str(r.get("tag_name", "")).lstrip("v"),
-                    "date": r.get("published_at", ""),
-                    "title": r.get("name", ""),
-                    "changelog": (
-                        (r.get("body", "")[:500] + "...")
-                        if len(r.get("body", "")) > 500
-                        else r.get("body", "")
-                    ),
-                    "url": r.get("html_url", ""),
-                    "prerelease": r.get("prerelease", False),
-                }
-                for r in releases
-            ],
-            "checked_at": _utc_now(),
-        }
-    except Exception:
-        current = get_runtime_version()
+            return {
+                "releases": [
+                    {"version": r.get("tag_name", "").lstrip("v"), "date": r.get("published_at", ""), "title": r.get("name", ""), "changelog": r.get("body", "")[:500] + "..." if len(r.get("body", "")) > 500 else r.get("body", ""), "url": r.get("html_url", ""), "prerelease": r.get("prerelease", False)}
+                    for r in releases
+                ],
+                "checked_at": datetime.now(timezone.utc).isoformat() + "Z"
+            }
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError):
+        version_file = Path(INSTALL_DIR) / ".version"
+        current = version_file.read_text().strip() if version_file.exists() else "0.0.0"
         return {
             "releases": [
                 {
@@ -319,21 +318,20 @@ async def trigger_update(
 
     if action.action == "backup":
         try:
-            result = subprocess.run(
-                [str(script_path), "backup", f"dashboard-{datetime.now().strftime('%Y%m%d-%H%M%S')}"],
-                capture_output=True,
-                text=True,
-                timeout=90,
-                check=False,
-            )
-            return {
-                "success": result.returncode == 0,
-                "output": (result.stdout or "") + (result.stderr or ""),
-                "returncode": result.returncode,
-            }
+            result = subprocess.run([str(script_path), "check"], capture_output=True, text=True, timeout=30)
+            return {"success": True, "update_available": result.returncode == 2, "output": result.stdout + result.stderr}
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail="Update check timed out")
+        except (subprocess.SubprocessError, OSError):
+            logger.exception("Update check failed")
+            raise HTTPException(status_code=500, detail="Check failed")
+    elif action.action == "backup":
+        try:
+            result = subprocess.run([str(script_path), "backup", f"dashboard-{datetime.now().strftime('%Y%m%d-%H%M%S')}"], capture_output=True, text=True, timeout=60)
+            return {"success": result.returncode == 0, "output": result.stdout + result.stderr}
         except subprocess.TimeoutExpired:
             raise HTTPException(status_code=504, detail="Backup timed out")
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             logger.exception("Backup failed")
             raise HTTPException(status_code=500, detail="Backup failed")
 

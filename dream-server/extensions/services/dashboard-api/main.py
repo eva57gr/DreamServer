@@ -27,7 +27,7 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 # --- Local modules ---
-from config import SERVICES, INSTALL_DIR, DATA_DIR, SIDEBAR_ICONS
+from config import SERVICES, DATA_DIR, SIDEBAR_ICONS, MANIFEST_ERRORS
 from models import (
     GPUInfo, ServiceStatus, DiskUsage, ModelInfo, BootstrapStatus,
     FullStatus, PortCheckRequest,
@@ -35,7 +35,7 @@ from models import (
 from security import verify_api_key
 from gpu import get_gpu_info
 from helpers import (
-    check_service_health, get_all_services,
+    get_all_services,
     get_disk_usage, get_model_info, get_bootstrap_status,
     get_uptime, get_cpu_metrics, get_ram_metrics,
     get_llama_metrics, get_loaded_model, get_llama_context_size,
@@ -72,8 +72,8 @@ def get_allowed_origins():
             if ip.startswith(("192.168.", "10.", "172.")):
                 origins.append(f"http://{ip}:3001")
                 origins.append(f"http://{ip}:3000")
-    except Exception:
-        pass
+    except (OSError, socket.gaierror):
+        logger.debug("Could not detect LAN IPs for CORS origins")
     return origins
 
 app.add_middleware(
@@ -122,7 +122,7 @@ async def preflight_docker():
         return {"available": False, "error": "Docker not installed"}
     except subprocess.TimeoutExpired:
         return {"available": False, "error": "Docker check timed out"}
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError):
         logger.exception("Docker preflight check failed")
         return {"available": False, "error": "Docker check failed"}
 
@@ -144,7 +144,7 @@ async def preflight_gpu():
     return {"available": False, "error": "No GPU detected. Ensure NVIDIA drivers or AMD amdgpu driver is loaded."}
 
 
-@app.get("/api/preflight/required-ports", dependencies=[Depends(verify_api_key)])
+@app.get("/api/preflight/required-ports")
 async def preflight_required_ports():
     """Return the list of service ports for preflight checking (no auth required)."""
     ports = []
@@ -166,11 +166,10 @@ async def preflight_ports(request: PortCheckRequest):
 
     conflicts = []
     for port in request.ports:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1)
         try:
-            sock.bind(("0.0.0.0", port))
-            sock.close()
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(1)
+                sock.bind(("0.0.0.0", port))
         except socket.error:
             conflicts.append({"port": port, "service": port_services.get(port, "Unknown"), "in_use": True})
     return {"conflicts": conflicts, "available": len(conflicts) == 0}
@@ -183,7 +182,7 @@ async def preflight_disk():
         check_path = DATA_DIR if os.path.exists(DATA_DIR) else Path.home()
         usage = shutil.disk_usage(check_path)
         return {"free": usage.free, "total": usage.total, "used": usage.used, "path": str(check_path)}
-    except Exception as e:
+    except OSError:
         logger.exception("Disk preflight check failed")
         return {"error": "Disk check failed", "free": 0, "total": 0, "used": 0, "path": ""}
 
@@ -252,6 +251,7 @@ async def api_status(api_key: str = Depends(verify_api_key)):
             "ram": {"used_gb": 0, "total_gb": 0, "percent": 0},
             "inference": {"tokensPerSecond": 0, "lifetimeTokens": 0,
                           "loadedModel": None, "contextSize": None},
+            "manifest_errors": MANIFEST_ERRORS,
         }
 
 
@@ -316,7 +316,7 @@ async def _build_api_status() -> dict:
         elif vram_gb >= 8: tier = "Entry"
         else: tier = "Minimal"
 
-    return {
+    result = {
         "gpu": gpu_data, "services": services_data, "model": model_data,
         "bootstrap": bootstrap_data, "uptime": get_uptime(),
         "version": app.version, "tier": tier,
@@ -327,7 +327,9 @@ async def _build_api_status() -> dict:
             "loadedModel": loaded_model or (model_data["name"] if model_data else None),
             "contextSize": context_size or (model_data["contextLength"] if model_data else None),
         },
+        "manifest_errors": MANIFEST_ERRORS,
     }
+    return result
 
 
 # --- Settings ---
@@ -347,7 +349,7 @@ async def service_tokens():
                             break
                 else:
                     oc_token = path.read_text().strip()
-            except Exception:
+            except (OSError, ValueError):
                 continue
             if oc_token:
                 break

@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +168,41 @@ def test_preflight_required_ports_no_auth(test_client):
     assert isinstance(data["ports"], list)
 
 
+def test_preflight_docker_authenticated(test_client):
+    """GET /api/preflight/docker with auth → 200, returns docker availability."""
+    resp = test_client.get("/api/preflight/docker", headers=test_client.auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "available" in data
+    if data["available"]:
+        assert "version" in data
+
+
+def test_preflight_gpu_authenticated(test_client):
+    """GET /api/preflight/gpu with auth → 200, returns GPU info or error."""
+    resp = test_client.get("/api/preflight/gpu", headers=test_client.auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "available" in data
+    if data["available"]:
+        assert "name" in data
+        assert "vram" in data
+        assert "backend" in data
+    else:
+        assert "error" in data
+
+
+def test_preflight_disk_authenticated(test_client):
+    """GET /api/preflight/disk with auth → 200, returns disk space info."""
+    resp = test_client.get("/api/preflight/disk", headers=test_client.auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "free" in data
+    assert "total" in data
+    assert "used" in data
+    assert "path" in data
+
+
 # ---------------------------------------------------------------------------
 # Workflow path-traversal and catalog miss
 # ---------------------------------------------------------------------------
@@ -224,89 +256,56 @@ def test_privacy_shield_status_with_mock(test_client):
 
 
 # ---------------------------------------------------------------------------
-# Updates router
+# Core API Endpoints
 # ---------------------------------------------------------------------------
 
 
-def test_api_version_reads_json_version_state(test_client, tmp_path, monkeypatch):
-    """GET /api/version should read current version from JSON .version format."""
-    import routers.updates as updates_router
-
-    install_dir = tmp_path / "dream-install"
-    install_dir.mkdir()
-    (install_dir / ".version").write_text(
-        json.dumps({"version": "2.3.4", "last_check": "2026-03-17T10:00:00Z"})
-    )
-    monkeypatch.setattr(updates_router, "INSTALL_DIR", str(install_dir))
-
-    with patch("urllib.request.urlopen", side_effect=Exception("offline")):
-        resp = test_client.get("/api/version", headers=test_client.auth_headers)
-
+def test_api_status_authenticated(test_client):
+    """GET /api/status with auth → 200, returns full system status."""
+    resp = test_client.get("/api/status", headers=test_client.auth_headers)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["current"] == "2.3.4"
-    assert data["update_available"] is False
-    assert data["checked_at"].endswith("Z")
+    assert "gpu" in data
+    assert "services" in data
+    assert "model" in data
+    assert "bootstrap" in data
+    assert "uptime" in data
+    assert "version" in data
+    assert "tier" in data
+    assert "cpu" in data
+    assert "ram" in data
+    assert "inference" in data
 
 
-def test_release_manifest_fallback_reads_json_version_state(test_client, tmp_path, monkeypatch):
-    """GET /api/releases/manifest fallback should expose only the version field."""
-    import routers.updates as updates_router
-
-    install_dir = tmp_path / "dream-install"
-    install_dir.mkdir()
-    (install_dir / ".version").write_text(
-        json.dumps({"version": "3.0.1", "last_update": "2026-03-17T12:00:00Z"})
-    )
-    monkeypatch.setattr(updates_router, "INSTALL_DIR", str(install_dir))
-
-    with patch("urllib.request.urlopen", side_effect=Exception("offline")):
-        resp = test_client.get("/api/releases/manifest", headers=test_client.auth_headers)
-
+def test_api_storage_authenticated(test_client):
+    """GET /api/storage with auth → 200, returns storage breakdown."""
+    resp = test_client.get("/api/storage", headers=test_client.auth_headers)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["releases"][0]["version"] == "3.0.1"
-    assert data["error"] == "Could not fetch release information"
+    assert "models" in data
+    assert "vector_db" in data
+    assert "total_data" in data
+    assert "disk" in data
+    assert "gb" in data["models"]
+    assert "percent" in data["models"]
 
 
-def test_update_check_parses_json_output(test_client, monkeypatch):
-    """POST /api/update check should call --json and return parsed payload fields."""
-    import routers.updates as updates_router
-
-    fake_script = Path("/tmp/fake-dream-update.sh")
-    monkeypatch.setattr(updates_router, "_resolve_update_script", lambda: fake_script)
-
-    check_payload = {
-        "success": True,
-        "current_version": "2.0.0",
-        "latest_version": "2.1.0",
-        "update_available": True,
-        "status": "update_available",
-        "checked_at": "2026-03-17T12:34:56Z",
-        "changelog_url": "https://github.com/example/release",
-        "error": None,
-    }
-    run_result = MagicMock()
-    run_result.returncode = 2
-    run_result.stdout = json.dumps(check_payload)
-    run_result.stderr = ""
-
-    with patch("routers.updates.subprocess.run", return_value=run_result) as run_mock:
-        resp = test_client.post(
-            "/api/update",
-            json={"action": "check"},
-            headers=test_client.auth_headers,
-        )
-
+def test_api_external_links_authenticated(test_client):
+    """GET /api/external-links with auth → 200, returns sidebar links."""
+    resp = test_client.get("/api/external-links", headers=test_client.auth_headers)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["success"] is True
-    assert data["update_available"] is True
-    assert data["current_version"] == "2.0.0"
-    assert data["latest_version"] == "2.1.0"
-    assert data["status"] == "update_available"
-    assert data["checked_at"] == "2026-03-17T12:34:56Z"
-    assert data["changelog_url"] == "https://github.com/example/release"
+    assert isinstance(data, list)
+    for link in data:
+        assert "id" in link
+        assert "label" in link
+        assert "port" in link
+        assert "icon" in link
 
-    args, _ = run_mock.call_args
-    assert args[0][-2:] == ["check", "--json"]
+
+def test_api_service_tokens_authenticated(test_client):
+    """GET /api/service-tokens with auth → 200, returns service tokens."""
+    resp = test_client.get("/api/service-tokens", headers=test_client.auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, dict)

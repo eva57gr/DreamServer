@@ -92,8 +92,12 @@ async def get_version():
             if latest:
                 result["latest"] = latest
                 result["changelog_url"] = data.get("html_url")
-                result["update_available"] = _semver_triplet(latest) > _semver_triplet(current)
-    except Exception:
+                current_parts = [int(x) for x in current.split(".") if x.isdigit()][:3]
+                latest_parts = [int(x) for x in latest.split(".") if x.isdigit()][:3]
+                current_parts += [0] * (3 - len(current_parts))
+                latest_parts += [0] * (3 - len(latest_parts))
+                result["update_available"] = latest_parts > current_parts
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError, ValueError):
         pass
 
     return result
@@ -116,7 +120,7 @@ async def get_release_manifest():
                 ],
                 "checked_at": _utc_now_iso()
             }
-    except Exception:
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError):
         version_file = Path(INSTALL_DIR) / ".version"
         current = _read_release_state(version_file).get("version", "0.0.0")
         return {
@@ -160,7 +164,7 @@ async def trigger_update(action: UpdateAction, background_tasks: BackgroundTasks
             return payload
         except subprocess.TimeoutExpired:
             raise HTTPException(status_code=504, detail="Update check timed out")
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             logger.exception("Update check failed")
             raise HTTPException(status_code=500, detail="Check failed")
     elif action.action == "backup":
@@ -169,7 +173,7 @@ async def trigger_update(action: UpdateAction, background_tasks: BackgroundTasks
             return {"success": result.returncode == 0, "output": result.stdout + result.stderr}
         except subprocess.TimeoutExpired:
             raise HTTPException(status_code=504, detail="Backup timed out")
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             logger.exception("Backup failed")
             raise HTTPException(status_code=500, detail="Backup failed")
     elif action.action == "update":

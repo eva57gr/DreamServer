@@ -280,7 +280,8 @@ detect_apple() {
 
 # Get CPU info
 detect_cpu() {
-    local os=$(detect_os)
+    local os
+    os=$(detect_os)
     case $os in
         macos)
             sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "Unknown"
@@ -293,7 +294,8 @@ detect_cpu() {
 
 # Get CPU cores
 detect_cores() {
-    local os=$(detect_os)
+    local os
+    os=$(detect_os)
     case $os in
         macos)
             sysctl -n hw.ncpu 2>/dev/null || echo "0"
@@ -306,7 +308,8 @@ detect_cores() {
 
 # Get RAM in GB
 detect_ram() {
-    local os=$(detect_os)
+    local os
+    os=$(detect_os)
     case $os in
         macos)
             sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024/1024/1024)}'
@@ -512,7 +515,8 @@ main() {
     if [[ "$memory_type" == "unified" && "$gpu_type" == "amd" ]]; then
         tier=$(get_strix_halo_tier "$ram")
     elif [[ "$gpu_type" == "apple" ]]; then
-        local unified_gb=$((gpu_vram_mb / 1024))
+        local unified_gb
+        unified_gb=$((gpu_vram_mb / 1024))
         tier=$(get_apple_tier "$unified_gb")
     else
         tier=$(get_tier "$gpu_vram_mb")
@@ -520,7 +524,8 @@ main() {
     tier_desc=$(tier_description "$tier")
     recommended_model=$(tier_model "$tier")
 
-    local gpu_vram_gb=$((gpu_vram_mb / 1024))
+    local gpu_vram_gb
+    gpu_vram_gb=$((gpu_vram_mb / 1024))
 
     if $json_output; then
         # Emit JSON with escaping to avoid breaking downstream parsers.

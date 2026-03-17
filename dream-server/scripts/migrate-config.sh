@@ -22,6 +22,15 @@ BACKUP_DIR="${DATA_DIR}/backups"
 MIGRATIONS_DIR="${SCRIPT_DIR}"
 VERSION_FILE="${INSTALL_DIR}/.version"
 MIGRATION_STATE="${DATA_DIR}/.migration-state"
+VERSION_LIB="${SCRIPT_DIR}/version-file.sh"
+
+if [[ ! -f "$VERSION_LIB" ]]; then
+    echo "Error: missing version helper at ${VERSION_LIB}" >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+. "$VERSION_LIB"
+command -v python3 >/dev/null 2>&1 || { echo "Error: python3 is required but not installed." >&2; exit 1; }
 
 # Colors
 RED='\033[0;31m'
@@ -37,11 +46,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Get current version
 get_current_version() {
-    if [[ -f "$VERSION_FILE" ]]; then
-        cat "$VERSION_FILE" | tr -d '[:space:]'
-    else
-        echo "0.0.0"
-    fi
+    version_file_get_current "$VERSION_FILE" "0.0.0"
 }
 
 # Get last migrated version
@@ -70,6 +75,17 @@ compare_versions() {
         return 0
     fi
     
+    if [[ "$v1" =~ ^([0-9]+)(\.([0-9]+))?(\.([0-9]+))? ]]; then
+        v1="${BASH_REMATCH[1]}.${BASH_REMATCH[3]:-0}.${BASH_REMATCH[5]:-0}"
+    else
+        v1="0.0.0"
+    fi
+    if [[ "$v2" =~ ^([0-9]+)(\.([0-9]+))?(\.([0-9]+))? ]]; then
+        v2="${BASH_REMATCH[1]}.${BASH_REMATCH[3]:-0}.${BASH_REMATCH[5]:-0}"
+    else
+        v2="0.0.0"
+    fi
+
     IFS='.' read -ra V1_PARTS <<< "$v1"
     IFS='.' read -ra V2_PARTS <<< "$v2"
     
@@ -85,6 +101,16 @@ compare_versions() {
     done
     
     return 0
+}
+
+# Execute compare_versions safely under set -e and print numeric result.
+compare_versions_code() {
+    local result
+    set +e
+    compare_versions "$1" "$2"
+    result=$?
+    set -e
+    echo "$result"
 }
 
 # Backup current configuration
@@ -160,10 +186,10 @@ cmd_check() {
     log_info "Current version: $current_version"
     log_info "Last migrated: $last_migrated"
     
-    compare_versions "$current_version" "$last_migrated"
-    local result=$?
+    local result
+    result="$(compare_versions_code "$current_version" "$last_migrated")"
     
-    if [[ $result -eq 2 ]]; then
+    if [[ $result -eq 1 ]]; then
         log_warn "Migration needed: $last_migrated → $current_version"
         
         # List pending migrations
@@ -174,14 +200,17 @@ cmd_check() {
                 local migration_version
                 migration_version=$(basename "$migration" | sed 's/migrate-v//;s/.sh//')
                 
-                compare_versions "$migration_version" "$last_migrated"
-                if [[ $? -eq 1 ]]; then
+                if [[ "$(compare_versions_code "$migration_version" "$last_migrated")" -eq 1 ]]; then
                     echo "  - $migration_version: $(head -5 "$migration" | grep '^# Description:' | sed 's/# Description://')"
                 fi
             fi
         done
         
         return 2
+    elif [[ $result -eq 2 ]]; then
+        log_warn "Last migrated version ($last_migrated) is ahead of current ($current_version)."
+        log_warn "Skipping migrations; verify your .version and migration state."
+        return 0
     else
         log_success "No migration needed (already at $current_version)"
         return 0
@@ -201,8 +230,14 @@ cmd_migrate() {
     # Create backup first
     cmd_backup >/dev/null
     
-    compare_versions "$current_version" "$last_migrated"
-    if [[ $? -ne 2 ]]; then
+    local compare_result
+    compare_result="$(compare_versions_code "$current_version" "$last_migrated")"
+    if [[ "$compare_result" -ne 1 ]]; then
+        if [[ "$compare_result" -eq 2 ]]; then
+            log_warn "Last migrated version ($last_migrated) is ahead of current ($current_version)."
+            log_warn "Skipping migrations; verify your .version and migration state."
+            return 0
+        fi
         log_success "Already up to date ($current_version)"
         return 0
     fi
@@ -217,8 +252,7 @@ cmd_migrate() {
             migration_version=$(basename "$migration" | sed 's/migrate-v//;s/.sh//')
             
             # Check if this migration is needed
-            compare_versions "$migration_version" "$last_migrated"
-            if [[ $? -eq 1 ]]; then
+            if [[ "$(compare_versions_code "$migration_version" "$last_migrated")" -eq 1 ]]; then
                 log_info "Running migration: $migration_version"
                 
                 if bash "$migration"; then

@@ -221,3 +221,92 @@ def test_privacy_shield_status_with_mock(test_client):
     assert "enabled" in data
     assert "container_running" in data
     assert "port" in data
+
+
+# ---------------------------------------------------------------------------
+# Updates router
+# ---------------------------------------------------------------------------
+
+
+def test_api_version_reads_json_version_state(test_client, tmp_path, monkeypatch):
+    """GET /api/version should read current version from JSON .version format."""
+    import routers.updates as updates_router
+
+    install_dir = tmp_path / "dream-install"
+    install_dir.mkdir()
+    (install_dir / ".version").write_text(
+        json.dumps({"version": "2.3.4", "last_check": "2026-03-17T10:00:00Z"})
+    )
+    monkeypatch.setattr(updates_router, "INSTALL_DIR", str(install_dir))
+
+    with patch("urllib.request.urlopen", side_effect=Exception("offline")):
+        resp = test_client.get("/api/version", headers=test_client.auth_headers)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["current"] == "2.3.4"
+    assert data["update_available"] is False
+    assert data["checked_at"].endswith("Z")
+
+
+def test_release_manifest_fallback_reads_json_version_state(test_client, tmp_path, monkeypatch):
+    """GET /api/releases/manifest fallback should expose only the version field."""
+    import routers.updates as updates_router
+
+    install_dir = tmp_path / "dream-install"
+    install_dir.mkdir()
+    (install_dir / ".version").write_text(
+        json.dumps({"version": "3.0.1", "last_update": "2026-03-17T12:00:00Z"})
+    )
+    monkeypatch.setattr(updates_router, "INSTALL_DIR", str(install_dir))
+
+    with patch("urllib.request.urlopen", side_effect=Exception("offline")):
+        resp = test_client.get("/api/releases/manifest", headers=test_client.auth_headers)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["releases"][0]["version"] == "3.0.1"
+    assert data["error"] == "Could not fetch release information"
+
+
+def test_update_check_parses_json_output(test_client, monkeypatch):
+    """POST /api/update check should call --json and return parsed payload fields."""
+    import routers.updates as updates_router
+
+    fake_script = Path("/tmp/fake-dream-update.sh")
+    monkeypatch.setattr(updates_router, "_resolve_update_script", lambda: fake_script)
+
+    check_payload = {
+        "success": True,
+        "current_version": "2.0.0",
+        "latest_version": "2.1.0",
+        "update_available": True,
+        "status": "update_available",
+        "checked_at": "2026-03-17T12:34:56Z",
+        "changelog_url": "https://github.com/example/release",
+        "error": None,
+    }
+    run_result = MagicMock()
+    run_result.returncode = 2
+    run_result.stdout = json.dumps(check_payload)
+    run_result.stderr = ""
+
+    with patch("routers.updates.subprocess.run", return_value=run_result) as run_mock:
+        resp = test_client.post(
+            "/api/update",
+            json={"action": "check"},
+            headers=test_client.auth_headers,
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert data["update_available"] is True
+    assert data["current_version"] == "2.0.0"
+    assert data["latest_version"] == "2.1.0"
+    assert data["status"] == "update_available"
+    assert data["checked_at"] == "2026-03-17T12:34:56Z"
+    assert data["changelog_url"] == "https://github.com/example/release"
+
+    args, _ = run_mock.call_args
+    assert args[0][-2:] == ["check", "--json"]

@@ -12,9 +12,6 @@
 
 set -euo pipefail
 
-# Prerequisites
-command -v jq >/dev/null 2>&1 || { echo "Error: jq is required but not installed." >&2; echo "Install with: apt install jq (Debian/Ubuntu) or brew install jq (macOS)" >&2; exit 1; }
-
 #==============================================================================
 # CONFIGURATION
 #==============================================================================
@@ -27,6 +24,14 @@ MAX_BACKUPS="${MAX_BACKUPS:-10}"
 UPDATE_CHANNEL="${UPDATE_CHANNEL:-stable}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
 GITHUB_REPO="${GITHUB_REPO:-Light-Heart-Labs/DreamServer}"
+VERSION_LIB="${INSTALL_DIR}/scripts/version-file.sh"
+
+if [[ ! -f "$VERSION_LIB" ]]; then
+    echo "Error: missing version helper at ${VERSION_LIB}" >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+. "$VERSION_LIB"
 
 # Colors
 RED='\033[0;31m'
@@ -38,6 +43,7 @@ NC='\033[0m'
 # Prerequisites check
 command -v jq >/dev/null 2>&1 || { echo -e "${RED}Error: jq is required but not installed.${NC}" >&2; echo "Install with: apt install jq (Debian/Ubuntu) or brew install jq (macOS)" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo -e "${RED}Error: curl is required but not installed.${NC}" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo -e "${RED}Error: python3 is required but not installed.${NC}" >&2; exit 1; }
 
 #==============================================================================
 # HELPER FUNCTIONS
@@ -49,39 +55,78 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
 get_current_version() {
-    if [[ -f "$VERSION_FILE" ]]; then
-        jq -r '.version // "0.0.0"' "$VERSION_FILE" 2>/dev/null || echo "0.0.0"
+    version_file_get_current "$VERSION_FILE" "0.0.0"
+}
+
+# Convert version string to "major minor patch" numeric triplet.
+_semver_triplet() {
+    local raw="${1#v}"
+    if [[ "$raw" =~ ^([0-9]+)(\.([0-9]+))?(\.([0-9]+))? ]]; then
+        echo "${BASH_REMATCH[1]} ${BASH_REMATCH[3]:-0} ${BASH_REMATCH[5]:-0}"
     else
-        echo "0.0.0"
+        # Non-semver strings (e.g. git hash) are treated as 0.0.0
+        echo "0 0 0"
     fi
 }
 
-# Semver compare: returns 0 if equal, 1 if v1 > v2, 2 if v1 < v2
+# Semver compare: returns 0 if equal, 1 if v1 > v2, 2 if v1 < v2.
 semver_compare() {
-    local v1="${1#v}"
-    local v2="${2#v}"
-    
-    if [[ "$v1" == "$v2" ]]; then
+    local a_major a_minor a_patch
+    local b_major b_minor b_patch
+    read -r a_major a_minor a_patch <<< "$(_semver_triplet "$1")"
+    read -r b_major b_minor b_patch <<< "$(_semver_triplet "$2")"
+
+    if ((a_major == b_major && a_minor == b_minor && a_patch == b_patch)); then
         return 0
     fi
-    
-    local IFS='.'
-    local i v1_parts=($v1) v2_parts=($v2)
-    
-    for ((i=0; i<3; i++)); do
-        local n1="${v1_parts[$i]:-0}"
-        local n2="${v2_parts[$i]:-0}"
-        # Strip any non-numeric suffix
-        n1="${n1%%[!0-9]*}"
-        n2="${n2%%[!0-9]*}"
-        
-        if ((n1 > n2)); then
-            return 1
-        elif ((n1 < n2)); then
-            return 2
-        fi
-    done
-    return 0
+
+    if ((a_major > b_major)); then
+        return 1
+    elif ((a_major < b_major)); then
+        return 2
+    fi
+
+    if ((a_minor > b_minor)); then
+        return 1
+    elif ((a_minor < b_minor)); then
+        return 2
+    fi
+
+    if ((a_patch > b_patch)); then
+        return 1
+    fi
+    return 2
+}
+
+emit_check_json() {
+    local success="$1"
+    local current_version="$2"
+    local latest_version="$3"
+    local update_available="$4"
+    local status="$5"
+    local checked_at="$6"
+    local changelog_url="$7"
+    local error_message="$8"
+
+    jq -n \
+        --arg current_version "$current_version" \
+        --arg latest_version "$latest_version" \
+        --arg status "$status" \
+        --arg checked_at "$checked_at" \
+        --arg changelog_url "$changelog_url" \
+        --arg error_message "$error_message" \
+        --argjson success "$success" \
+        --argjson update_available "$update_available" \
+        '{
+            success: $success,
+            current_version: $current_version,
+            latest_version: (if $latest_version == "" then null else $latest_version end),
+            update_available: $update_available,
+            status: $status,
+            checked_at: $checked_at,
+            changelog_url: (if $changelog_url == "" then null else $changelog_url end),
+            error: (if $error_message == "" then null else $error_message end)
+        }'
 }
 
 #==============================================================================
@@ -89,64 +134,96 @@ semver_compare() {
 #==============================================================================
 
 cmd_check() {
-    log_info "Checking for updates..."
-    
-    local current_version
-    current_version=$(get_current_version)
-    log_info "Current version: ${current_version}"
-    
-    # Fetch latest release from GitHub
-    local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+    local json_mode="false"
+    if [[ "${1:-}" == "--json" ]]; then
+        json_mode="true"
+    elif [[ -n "${1:-}" ]]; then
+        log_error "Unknown option for check: $1"
+        return 1
+    fi
+
+    local current_version latest_version changelog_url checked_at
+    local update_available="false"
+    local status="up_to_date"
     local response
+    local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
     local curl_args=(-sf --max-time 15)
+    local cmp_result=0
+
+    current_version=$(get_current_version)
+    latest_version=""
+    changelog_url=""
+    checked_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    if [[ "$json_mode" != "true" ]]; then
+        log_info "Checking for updates..."
+        log_info "Current version: ${current_version}"
+    fi
+
     if [[ -n "${GITHUB_TOKEN:-}" ]]; then
         curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
     fi
 
     if ! response=$(curl "${curl_args[@]}" "${api_url}" 2>/dev/null); then
-        log_error "Failed to check for updates. Check network or GITHUB_TOKEN."
+        status="error"
+        version_file_upsert_fields "$VERSION_FILE" "last_check=$checked_at"
+        if [[ "$json_mode" == "true" ]]; then
+            emit_check_json "false" "$current_version" "" "false" "$status" "$checked_at" "" "Failed to check GitHub releases"
+        else
+            log_error "Failed to check for updates. Check network or GITHUB_TOKEN."
+        fi
         return 1
     fi
-    
-    local latest_version
-    latest_version=$(echo "$response" | jq -r '.tag_name // empty')
-    
+
+    latest_version="$(echo "$response" | jq -r '.tag_name // empty' | sed 's/^v//')"
+    changelog_url="$(echo "$response" | jq -r '.html_url // empty')"
+
     if [[ -z "$latest_version" ]]; then
-        log_warn "No releases found on GitHub. You may be on a development version."
-        return 0
-    fi
-    
-    log_info "Latest version: ${latest_version}"
-    
-    # Compare versions
-    set +e
-    semver_compare "$current_version" "$latest_version"
-    local cmp_result=$?
-    set -e
-    
-    case $cmp_result in
-        0)
-            log_ok "You are on the latest version."
-            ;;
-        1)
-            log_warn "You are ahead of the latest release (development version)."
-            ;;
-        2)
-            log_info "Update available: ${current_version} → ${latest_version}"
-            echo ""
-            echo "Run 'dream-update.sh update' to update."
-            ;;
-    esac
-    
-    # Update last check timestamp
-    mkdir -p "$(dirname "$VERSION_FILE")"
-    local version_data
-    if [[ -f "$VERSION_FILE" ]]; then
-        version_data=$(cat "$VERSION_FILE")
+        status="no_release"
+        if [[ "$json_mode" != "true" ]]; then
+            log_warn "No releases found on GitHub. You may be on a development version."
+        fi
     else
-        version_data='{}'
+        if [[ "$json_mode" != "true" ]]; then
+            log_info "Latest version: ${latest_version}"
+        fi
+
+        set +e
+        semver_compare "$current_version" "$latest_version"
+        cmp_result=$?
+        set -e
+
+        case "$cmp_result" in
+            0)
+                status="up_to_date"
+                [[ "$json_mode" != "true" ]] && log_ok "You are on the latest version."
+                ;;
+            1)
+                status="ahead"
+                [[ "$json_mode" != "true" ]] && log_warn "You are ahead of the latest release (development version)."
+                ;;
+            2)
+                status="update_available"
+                update_available="true"
+                if [[ "$json_mode" != "true" ]]; then
+                    log_info "Update available: ${current_version} → ${latest_version}"
+                    echo ""
+                    echo "Run 'dream-update.sh update' to update."
+                fi
+                ;;
+        esac
     fi
-    echo "$version_data" | jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.last_check = $ts' > "$VERSION_FILE"
+
+    version_file_upsert_fields "$VERSION_FILE" "last_check=$checked_at"
+
+    if [[ "$json_mode" == "true" ]]; then
+        emit_check_json "true" "$current_version" "$latest_version" "$update_available" "$status" "$checked_at" "$changelog_url" ""
+    fi
+
+    if [[ "$update_available" == "true" ]]; then
+        return 2
+    fi
+    return 0
 }
 
 #==============================================================================
@@ -163,17 +240,12 @@ cmd_status() {
     echo "Update channel: ${UPDATE_CHANNEL}"
     echo ""
     
-    if [[ -f "$VERSION_FILE" ]]; then
-        local last_check
-        last_check=$(jq -r '.last_check // "never"' "$VERSION_FILE" 2>/dev/null || echo "never")
-        local last_update
-        last_update=$(jq -r '.last_update // "never"' "$VERSION_FILE" 2>/dev/null || echo "never")
-        echo "Last check:     ${last_check}"
-        echo "Last update:    ${last_update}"
-    else
-        echo "Last check:     never"
-        echo "Last update:    never"
-    fi
+    local last_check
+    last_check="$(version_file_get_field "$VERSION_FILE" "last_check" "never")"
+    local last_update
+    last_update="$(version_file_get_field "$VERSION_FILE" "last_update" "never")"
+    echo "Last check:     ${last_check}"
+    echo "Last update:    ${last_update}"
     
     echo ""
     
@@ -336,16 +408,10 @@ cmd_update() {
     # Update version file
     local new_version
     new_version=$(git describe --tags 2>/dev/null || git rev-parse --short HEAD)
-    local version_data
-    if [[ -f "$VERSION_FILE" ]]; then
-        version_data=$(cat "$VERSION_FILE")
-    else
-        version_data='{}'
-    fi
-    echo "$version_data" | jq \
-        --arg v "$new_version" \
-        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '.version = $v | .last_update = $ts' > "$VERSION_FILE"
+    version_file_upsert_fields \
+        "$VERSION_FILE" \
+        "version=$new_version" \
+        "last_update=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     
     log_ok "Update complete! Version: ${new_version}"
 }
@@ -534,7 +600,7 @@ Dream Server Update Manager
 Usage: dream-update.sh <command> [options]
 
 Commands:
-  check          Check for available updates
+  check [--json] Check for available updates (exit: 0=none, 2=available, 1=error)
   status         Show current version and update status
   backup [name]  Create backup of current configuration
   update         Perform update with auto-rollback on failure
@@ -552,6 +618,7 @@ Environment Variables:
 
 Examples:
   dream-update.sh check
+  dream-update.sh check --json
   dream-update.sh status
   dream-update.sh backup pre-experiment
   dream-update.sh update

@@ -75,44 +75,75 @@ def load_extension_manifests(
     """Load service and feature definitions from extension manifests."""
     if not manifest_dir.exists():
         logger.info("Extension manifest directory not found: %s", manifest_dir)
-        return {}, []
+        return services, features
 
-    registry_mod = _load_service_registry_module()
-    root_dir = _resolve_registry_root(manifest_dir)
-    artifact_override = os.environ.get("DREAM_SERVICE_REGISTRY_PATH")
+    manifest_files: list[Path] = []
+    for item in sorted(manifest_dir.iterdir()):
+        if item.is_dir():
+            for name in ("manifest.yaml", "manifest.yml", "manifest.json"):
+                candidate = item / name
+                if candidate.exists():
+                    manifest_files.append(candidate)
+                    break
+        elif item.suffix.lower() in (".yaml", ".yml", ".json"):
+            manifest_files.append(item)
 
-    try:
-        canonical_manifest_dir = (root_dir / "extensions" / "services").resolve()
-        if manifest_dir.resolve() == canonical_manifest_dir:
-            artifact_path = registry_mod.ensure_registry_artifact(
-                root_dir=root_dir,
-                output_path=Path(artifact_override).resolve() if artifact_override else None,
-                strict=True,
-            )
-            registry = registry_mod.load_registry_artifact(artifact_path)
-        else:
-            schema_path = root_dir / "extensions" / "schema" / "service-manifest.v1.json"
-            registry = registry_mod.build_registry(
-                root_dir=root_dir,
-                extensions_dir=manifest_dir,
-                schema_path=schema_path,
-                strict=True,
-            )
-    except registry_mod.RegistryBuildError as exc:
-        logger.warning("Manifest registry validation failed: %s", "; ".join(exc.errors))
-        return {}, []
-    except Exception as exc:
-        logger.warning("Failed loading manifest registry from %s: %s", manifest_dir, exc)
-        return {}, []
+    for path in manifest_files:
+        try:
+            manifest = _read_manifest_file(path)
+            if manifest.get("schema_version") != "dream.services.v1":
+                logger.warning("Skipping manifest with unsupported schema_version: %s", path)
+                continue
 
-    services = registry_mod.build_runtime_services(registry, gpu_backend, dict(os.environ))
-    features = registry_mod.build_runtime_features(registry, gpu_backend)
-    logger.info(
-        "Loaded %d extension manifests (%d services, %d features)",
-        registry.get("manifest_count", 0),
-        len(services),
-        len(features),
-    )
+            service = manifest.get("service")
+            if isinstance(service, dict):
+                service_id = service.get("id")
+                if not service_id:
+                    raise ValueError("service.id is required")
+                supported = service.get("gpu_backends", ["amd", "nvidia", "apple"])
+                if gpu_backend == "apple":
+                    if service.get("type") == "host-systemd":
+                        continue  # Linux-only service, not available on macOS
+                    # All docker services run on macOS regardless of gpu_backends declaration
+                elif gpu_backend not in supported and "all" not in supported:
+                    continue
+
+                host_env = service.get("host_env")
+                default_host = service.get("default_host", "localhost")
+                host = os.environ.get(host_env, default_host) if host_env else default_host
+
+                ext_port_env = service.get("external_port_env")
+                ext_port_default = service.get("external_port_default", service.get("port", 0))
+                external_port = int(os.environ.get(ext_port_env, str(ext_port_default))) if ext_port_env else int(ext_port_default)
+
+                services[service_id] = {
+                    "host": host,
+                    "port": int(service.get("port", 0)),
+                    "external_port": external_port,
+                    "health": service.get("health", "/health"),
+                    "name": service.get("name", service_id),
+                    **({"type": service["type"]} if "type" in service else {}),
+                }
+
+            manifest_features = manifest.get("features", [])
+            if isinstance(manifest_features, list):
+                for feature in manifest_features:
+                    if not isinstance(feature, dict):
+                        continue
+                    supported = feature.get("gpu_backends", ["amd", "nvidia", "apple"])
+                    if gpu_backend != "apple" and gpu_backend not in supported and "all" not in supported:
+                        continue
+                    if feature.get("id") and feature.get("name"):
+                        missing = [f for f in ("description", "icon", "category", "setup_time", "priority") if f not in feature]
+                        if missing:
+                            logger.warning("Feature '%s' in %s missing optional fields: %s", feature["id"], path, ", ".join(missing))
+                        features.append(feature)
+
+            loaded += 1
+        except (yaml.YAMLError, json.JSONDecodeError, OSError, KeyError, TypeError) as e:
+            logger.warning("Failed loading manifest %s: %s", path, e)
+
+    logger.info("Loaded %d extension manifests (%d services, %d features)", loaded, len(services), len(features))
     return services, features
 
 

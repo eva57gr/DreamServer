@@ -36,7 +36,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-python3 - "$SCRIPT_DIR" "$TIER" "$GPU_BACKEND" "$PROFILE_OVERLAYS" "$ENV_MODE" <<'PY'
+ROOT_DIR="$SCRIPT_DIR"
+PYTHON_CMD="python3"
+if [[ -f "$ROOT_DIR/lib/python-cmd.sh" ]]; then
+    . "$ROOT_DIR/lib/python-cmd.sh"
+    PYTHON_CMD="$(ds_detect_python_cmd)"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_CMD="python"
+fi
+
+"$PYTHON_CMD" - "$SCRIPT_DIR" "$TIER" "$GPU_BACKEND" "$PROFILE_OVERLAYS" "$ENV_MODE" <<'PY'
+import os
 import pathlib
 import sys
 import json
@@ -46,6 +56,7 @@ tier = (sys.argv[2] or "1").upper()
 gpu_backend = (sys.argv[3] or "nvidia").lower()
 profile_overlays = [x.strip() for x in (sys.argv[4] or "").split(",") if x.strip()]
 env_mode = (sys.argv[5] or "false").lower() == "true"
+dream_mode = os.environ.get("DREAM_MODE", "local").lower()
 
 def existing(overlays):
     return all((script_dir / f).exists() for f in overlays)
@@ -114,25 +125,42 @@ if ext_dir.exists():
         # "none" means CPU-only — compatible with any GPU backend
         if gpu_backend not in backends and "all" not in backends and "none" not in backends:
             continue
-
-        compose_path_str = service.get("compose_path", "")
-        if compose_path_str:
-            compose_path = pathlib.Path(compose_path_str)
-            if compose_path.exists():
-                rel_compose = str(compose_path.relative_to(script_dir))
-                if rel_compose not in seen:
-                    resolved.append(rel_compose)
-                    seen.add(rel_compose)
-
-        # GPU-specific overlay (filesystem discovery — not in manifest)
-        service_dir = pathlib.Path(service.get("service_dir", ""))
-        if service_dir.exists():
+        try:
+            with open(manifest_path) as f:
+                if manifest_path.suffix == ".json":
+                    manifest = json.load(f)
+                else:
+                    manifest = yaml.safe_load(f)
+            if manifest.get("schema_version") != "dream.services.v1":
+                continue
+            service = manifest.get("service", {})
+            # Check GPU backend compatibility
+            backends = service.get("gpu_backends", ["amd", "nvidia"])
+            # "none" means CPU-only — compatible with any GPU backend
+            if gpu_backend not in backends and "all" not in backends and "none" not in backends:
+                continue
+            # Get compose file from manifest
+            compose_rel = service.get("compose_file", "")
+            if compose_rel and not compose_rel.endswith(".disabled"):
+                compose_path = service_dir / compose_rel
+                if compose_path.exists():
+                    resolved.append(str(compose_path.relative_to(script_dir)))
+                elif (service_dir / f"{compose_rel}.disabled").exists():
+                    continue  # Service disabled — skip all overlays
+            # GPU-specific overlay (filesystem discovery — not in manifest)
             gpu_overlay = service_dir / f"compose.{gpu_backend}.yaml"
             if gpu_overlay.exists():
-                rel_overlay = str(gpu_overlay.relative_to(script_dir))
-                if rel_overlay not in seen:
-                    resolved.append(rel_overlay)
-                    seen.add(rel_overlay)
+                resolved.append(str(gpu_overlay.relative_to(script_dir)))
+            # Mode-specific overlay — depends_on for local/hybrid mode only
+            if dream_mode in ("local", "hybrid"):
+                local_mode_overlay = service_dir / "compose.local.yaml"
+                if local_mode_overlay.exists():
+                    resolved.append(str(local_mode_overlay.relative_to(script_dir)))
+        except Exception as e:
+            print(f"ERROR: Failed to parse manifest for {service_dir.name}: {e}", file=sys.stderr)
+            print(f"  Manifest path: {manifest_path}", file=sys.stderr)
+            print(f"  This service will be skipped. Fix the manifest or disable the service.", file=sys.stderr)
+            sys.exit(1)
 
 # Include docker-compose.override.yml if it exists (user customizations)
 override = script_dir / "docker-compose.override.yml"

@@ -38,7 +38,11 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 # Get current version
 get_current_version() {
     if [[ -f "$VERSION_FILE" ]]; then
-        cat "$VERSION_FILE" | tr -d '[:space:]'
+        if command -v jq >/dev/null 2>&1 && jq -e 'type=="object"' "$VERSION_FILE" >/dev/null 2>&1; then
+            jq -r '.version // "0.0.0"' "$VERSION_FILE" 2>/dev/null || echo "0.0.0"
+        else
+            cat "$VERSION_FILE" | tr -d '[:space:]'
+        fi
     else
         echo "0.0.0"
     fi
@@ -76,6 +80,10 @@ compare_versions() {
     for i in {0..2}; do
         local p1="${V1_PARTS[$i]:-0}"
         local p2="${V2_PARTS[$i]:-0}"
+        p1="${p1%%[!0-9]*}"
+        p2="${p2%%[!0-9]*}"
+        [[ -n "$p1" ]] || p1=0
+        [[ -n "$p2" ]] || p2=0
         
         if [[ "$p1" -gt "$p2" ]]; then
             return 1

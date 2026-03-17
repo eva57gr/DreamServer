@@ -27,6 +27,7 @@ MAX_BACKUPS="${MAX_BACKUPS:-10}"
 UPDATE_CHANNEL="${UPDATE_CHANNEL:-stable}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
 GITHUB_REPO="${GITHUB_REPO:-Light-Heart-Labs/DreamServer}"
+OUTPUT_JSON="${OUTPUT_JSON:-false}"
 
 # Colors
 RED='\033[0;31m'
@@ -43,17 +44,59 @@ command -v curl >/dev/null 2>&1 || { echo -e "${RED}Error: curl is required but 
 # HELPER FUNCTIONS
 #==============================================================================
 
-log_info()  { echo -e "${BLUE}[INFO]${NC} $*"; }
-log_ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+log_info()  { [[ "$OUTPUT_JSON" == "true" ]] || echo -e "${BLUE}[INFO]${NC} $*"; }
+log_ok()    { [[ "$OUTPUT_JSON" == "true" ]] || echo -e "${GREEN}[OK]${NC} $*"; }
+log_warn()  { [[ "$OUTPUT_JSON" == "true" ]] || echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_error() { [[ "$OUTPUT_JSON" == "true" ]] || echo -e "${RED}[ERROR]${NC} $*" >&2; }
+
+utc_now() {
+    date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+read_version_state() {
+    if [[ ! -f "$VERSION_FILE" ]]; then
+        echo '{}'
+        return
+    fi
+
+    local raw
+    raw="$(cat "$VERSION_FILE" 2>/dev/null || true)"
+    if echo "$raw" | jq -e 'type=="object"' >/dev/null 2>&1; then
+        echo "$raw"
+        return
+    fi
+
+    # Legacy .version (plain text) support.
+    local legacy
+    legacy="$(echo "$raw" | tr -d '[:space:]')"
+    if [[ -n "$legacy" ]]; then
+        jq -n --arg v "$legacy" '{version: $v}'
+    else
+        echo '{}'
+    fi
+}
+
+write_version_state() {
+    local state="$1"
+    mkdir -p "$(dirname "$VERSION_FILE")"
+    if ! echo "$state" > "$VERSION_FILE" 2>/dev/null; then
+        log_warn "Could not write version state to ${VERSION_FILE} (read-only or permission denied)"
+    fi
+}
 
 get_current_version() {
-    if [[ -f "$VERSION_FILE" ]]; then
-        jq -r '.version // "0.0.0"' "$VERSION_FILE" 2>/dev/null || echo "0.0.0"
-    else
-        echo "0.0.0"
+    local state
+    state="$(read_version_state)"
+    local current
+    current="$(echo "$state" | jq -r '.version // "0.0.0"')"
+    if [[ "$current" == "0.0.0" && -f "${INSTALL_DIR}/manifest.json" ]]; then
+        local manifest_version
+        manifest_version="$(jq -r '.release.version // empty' "${INSTALL_DIR}/manifest.json" 2>/dev/null || true)"
+        if [[ -n "$manifest_version" ]]; then
+            current="$manifest_version"
+        fi
     fi
+    echo "$current"
 }
 
 # Semver compare: returns 0 if equal, 1 if v1 > v2, 2 if v1 < v2
@@ -74,6 +117,8 @@ semver_compare() {
         # Strip any non-numeric suffix
         n1="${n1%%[!0-9]*}"
         n2="${n2%%[!0-9]*}"
+        [[ -n "$n1" ]] || n1=0
+        [[ -n "$n2" ]] || n2=0
         
         if ((n1 > n2)); then
             return 1
@@ -90,11 +135,13 @@ semver_compare() {
 
 cmd_check() {
     log_info "Checking for updates..."
-    
+
+    local checked_at
+    checked_at="$(utc_now)"
     local current_version
-    current_version=$(get_current_version)
+    current_version="$(get_current_version)"
     log_info "Current version: ${current_version}"
-    
+
     # Fetch latest release from GitHub
     local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
     local response
@@ -102,51 +149,85 @@ cmd_check() {
     if [[ -n "${GITHUB_TOKEN:-}" ]]; then
         curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
     fi
-
-    if ! response=$(curl "${curl_args[@]}" "${api_url}" 2>/dev/null); then
-        log_error "Failed to check for updates. Check network or GITHUB_TOKEN."
+    if ! response="$(curl "${curl_args[@]}" "${api_url}" 2>/dev/null)"; then
+        if [[ "$OUTPUT_JSON" == "true" ]]; then
+            jq -n \
+                --arg current "$current_version" \
+                --arg checked_at "$checked_at" \
+                --arg status "check_failed" \
+                --arg message "Failed to check for updates. Check network or GITHUB_TOKEN." \
+                '{success:false,current:$current,latest:null,update_available:false,status:$status,checked_at:$checked_at,message:$message}'
+        else
+            log_error "Failed to check for updates. Check network or GITHUB_TOKEN."
+        fi
         return 1
     fi
-    
+
     local latest_version
-    latest_version=$(echo "$response" | jq -r '.tag_name // empty')
-    
-    if [[ -z "$latest_version" ]]; then
-        log_warn "No releases found on GitHub. You may be on a development version."
-        return 0
-    fi
-    
-    log_info "Latest version: ${latest_version}"
-    
-    # Compare versions
-    set +e
-    semver_compare "$current_version" "$latest_version"
-    local cmp_result=$?
-    set -e
-    
-    case $cmp_result in
-        0)
-            log_ok "You are on the latest version."
-            ;;
-        1)
-            log_warn "You are ahead of the latest release (development version)."
-            ;;
-        2)
-            log_info "Update available: ${current_version} → ${latest_version}"
-            echo ""
-            echo "Run 'dream-update.sh update' to update."
-            ;;
-    esac
-    
-    # Update last check timestamp
-    mkdir -p "$(dirname "$VERSION_FILE")"
-    local version_data
-    if [[ -f "$VERSION_FILE" ]]; then
-        version_data=$(cat "$VERSION_FILE")
+    latest_version="$(echo "$response" | jq -r '.tag_name // empty')"
+    latest_version="${latest_version#v}"
+    local changelog_url
+    changelog_url="$(echo "$response" | jq -r '.html_url // empty')"
+
+    local status="no_release"
+    local update_available="false"
+    local exit_code=0
+
+    if [[ -n "$latest_version" ]]; then
+        log_info "Latest version: ${latest_version}"
+        set +e
+        semver_compare "$current_version" "$latest_version"
+        local cmp_result=$?
+        set -e
+        case "$cmp_result" in
+            0)
+                status="up_to_date"
+                exit_code=0
+                log_ok "You are on the latest version."
+                ;;
+            1)
+                status="ahead"
+                exit_code=3
+                log_warn "You are ahead of the latest release (development version)."
+                ;;
+            2)
+                status="update_available"
+                update_available="true"
+                exit_code=2
+                log_info "Update available: ${current_version} → ${latest_version}"
+                [[ "$OUTPUT_JSON" == "true" ]] || {
+                    echo ""
+                    echo "Run 'dream-update.sh update' to update."
+                }
+                ;;
+        esac
     else
-        version_data='{}'
+        [[ "$OUTPUT_JSON" == "true" ]] || log_warn "No releases found on GitHub. You may be on a development version."
     fi
-    echo "$version_data" | jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.last_check = $ts' > "$VERSION_FILE"
+
+    # Persist check metadata (legacy .version files are migrated automatically).
+    local version_state
+    version_state="$(read_version_state)"
+    version_state="$(echo "$version_state" | jq \
+        --arg ver "$current_version" \
+        --arg latest "$latest_version" \
+        --arg url "$changelog_url" \
+        --arg ts "$checked_at" \
+        '.version=$ver | .last_check=$ts | .latest_release=$latest | .latest_release_url=$url')"
+    write_version_state "$version_state"
+
+    if [[ "$OUTPUT_JSON" == "true" ]]; then
+        jq -n \
+            --arg current "$current_version" \
+            --arg latest "$latest_version" \
+            --arg changelog_url "$changelog_url" \
+            --arg checked_at "$checked_at" \
+            --arg status "$status" \
+            --argjson update_available "$update_available" \
+            '{success:true,current:$current,latest:($latest|if .=="" then null else . end),update_available:$update_available,status:$status,changelog_url:($changelog_url|if .=="" then null else . end),checked_at:$checked_at}'
+    fi
+
+    return "$exit_code"
 }
 
 #==============================================================================
@@ -154,37 +235,49 @@ cmd_check() {
 #==============================================================================
 
 cmd_status() {
+    local version_state
+    version_state="$(read_version_state)"
+    local current_version
+    current_version="$(get_current_version)"
+    local last_check
+    last_check="$(echo "$version_state" | jq -r '.last_check // "never"')"
+    local last_update
+    last_update="$(echo "$version_state" | jq -r '.last_update // "never"')"
+    local backup_count=0
+    if [[ -d "$BACKUP_DIR" ]]; then
+        backup_count="$(find "$BACKUP_DIR" -maxdepth 1 -type d -name "backup-*" 2>/dev/null | wc -l)"
+    fi
+
+    if [[ "$OUTPUT_JSON" == "true" ]]; then
+        jq -n \
+            --arg version "$current_version" \
+            --arg install_path "$INSTALL_DIR" \
+            --arg backup_path "$BACKUP_DIR" \
+            --arg channel "$UPDATE_CHANNEL" \
+            --arg last_check "$last_check" \
+            --arg last_update "$last_update" \
+            --argjson backups "$backup_count" \
+            --argjson max_backups "$MAX_BACKUPS" \
+            '{version:$version,install_path:$install_path,backup_path:$backup_path,update_channel:$channel,last_check:$last_check,last_update:$last_update,backups:$backups,max_backups:$max_backups}'
+        return 0
+    fi
+
     echo "Dream Server Status"
     echo "==================="
     echo ""
-    echo "Version:        $(get_current_version)"
+    echo "Version:        ${current_version}"
     echo "Install path:   ${INSTALL_DIR}"
     echo "Backup path:    ${BACKUP_DIR}"
     echo "Update channel: ${UPDATE_CHANNEL}"
     echo ""
     
-    if [[ -f "$VERSION_FILE" ]]; then
-        local last_check
-        last_check=$(jq -r '.last_check // "never"' "$VERSION_FILE" 2>/dev/null || echo "never")
-        local last_update
-        last_update=$(jq -r '.last_update // "never"' "$VERSION_FILE" 2>/dev/null || echo "never")
-        echo "Last check:     ${last_check}"
-        echo "Last update:    ${last_update}"
-    else
-        echo "Last check:     never"
-        echo "Last update:    never"
-    fi
+    echo "Last check:     ${last_check}"
+    echo "Last update:    ${last_update}"
     
     echo ""
     
     # Count backups
-    if [[ -d "$BACKUP_DIR" ]]; then
-        local backup_count
-        backup_count=$(find "$BACKUP_DIR" -maxdepth 1 -type d -name "backup-*" 2>/dev/null | wc -l)
-        echo "Backups:        ${backup_count} (max: ${MAX_BACKUPS})"
-    else
-        echo "Backups:        0 (max: ${MAX_BACKUPS})"
-    fi
+    echo "Backups:        ${backup_count} (max: ${MAX_BACKUPS})"
 }
 
 #==============================================================================
@@ -263,6 +356,17 @@ cmd_update() {
     # Create pre-update backup
     log_info "Creating pre-update backup..."
     cmd_backup "pre-update-${current_version}"
+
+    # Compatibility gate before pull/restart.
+    if [[ -x "${INSTALL_DIR}/scripts/check-compatibility.sh" ]]; then
+        log_info "Running compatibility checks..."
+        if ! bash "${INSTALL_DIR}/scripts/check-compatibility.sh"; then
+            log_error "Compatibility gate failed. Aborting update."
+            return 1
+        fi
+    else
+        log_warn "Compatibility script not found; continuing without gate."
+    fi
     
     # Pull latest changes
     log_info "Pulling latest changes..."
@@ -336,16 +440,13 @@ cmd_update() {
     # Update version file
     local new_version
     new_version=$(git describe --tags 2>/dev/null || git rev-parse --short HEAD)
-    local version_data
-    if [[ -f "$VERSION_FILE" ]]; then
-        version_data=$(cat "$VERSION_FILE")
-    else
-        version_data='{}'
-    fi
-    echo "$version_data" | jq \
+    local version_state
+    version_state="$(read_version_state)"
+    version_state="$(echo "$version_state" | jq \
         --arg v "$new_version" \
-        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '.version = $v | .last_update = $ts' > "$VERSION_FILE"
+        --arg ts "$(utc_now)" \
+        '.version = $v | .last_update = $ts')"
+    write_version_state "$version_state"
     
     log_ok "Update complete! Version: ${new_version}"
 }
@@ -367,7 +468,7 @@ cmd_rollback() {
         fi
     else
         # Find latest backup
-        backup_path=$(find "$BACKUP_DIR" -maxdepth 1 -type d -name "backup-*" | sort -r | head -1)
+        backup_path=$(find "$BACKUP_DIR" -maxdepth 1 -type d -name "backup-*" 2>/dev/null | sort -r | head -1 || true)
     fi
     
     if [[ -z "$backup_path" || ! -d "$backup_path" ]]; then
@@ -497,13 +598,13 @@ cmd_health() {
     done
     
     # Check dashboard API health endpoint
-    local dashboard_port="${DASHBOARD_PORT:-3002}"
-    if curl -sf "http://localhost:${dashboard_port}/api/health" &>/dev/null; then
+    local dashboard_api_port="${DASHBOARD_API_PORT:-3002}"
+    if curl -sf "http://localhost:${dashboard_api_port}/health" &>/dev/null; then
         log_ok "Dashboard API: healthy"
-    elif curl -sf "http://localhost:${dashboard_port}/api/status" &>/dev/null; then
+    elif curl -sf "http://localhost:${dashboard_api_port}/api/status" &>/dev/null; then
         log_ok "Dashboard API: responding"
     else
-        log_warn "Dashboard API: not responding on port ${dashboard_port}"
+        log_warn "Dashboard API: not responding on port ${dashboard_api_port}"
     fi
     
     # Check llama-server health
@@ -534,8 +635,8 @@ Dream Server Update Manager
 Usage: dream-update.sh <command> [options]
 
 Commands:
-  check          Check for available updates
-  status         Show current version and update status
+  check [--json] Check for available updates
+  status [--json] Show current version and update status
   backup [name]  Create backup of current configuration
   update         Perform update with auto-rollback on failure
   rollback [id]  Restore from backup (default: latest)
@@ -547,17 +648,25 @@ Environment Variables:
   UPDATE_CHANNEL      stable|beta|nightly (default: stable)
   MAX_BACKUPS         Number of backups to retain (default: 10)
   HEALTH_TIMEOUT      Seconds to wait for health checks (default: 120)
-  DASHBOARD_PORT      Dashboard API port (default: 3002)
+  DASHBOARD_API_PORT  Dashboard API port (default: 3002)
   OLLAMA_PORT         llama-server port (default: 8080)
 
 Examples:
   dream-update.sh check
+  dream-update.sh check --json
   dream-update.sh status
+  dream-update.sh status --json
   dream-update.sh backup pre-experiment
   dream-update.sh update
   dream-update.sh rollback
   dream-update.sh changelog v1.1.0
   dream-update.sh health
+
+Exit codes (check):
+  0 up_to_date/no_release
+  1 check_failed
+  2 update_available
+  3 ahead (local > latest release)
 
 EOF
 }
@@ -572,9 +681,17 @@ main() {
 
     case "$command" in
         check)
+            if [[ "${1:-}" == "--json" ]]; then
+                OUTPUT_JSON="true"
+                shift
+            fi
             cmd_check "$@"
             ;;
         status)
+            if [[ "${1:-}" == "--json" ]]; then
+                OUTPUT_JSON="true"
+                shift
+            fi
             cmd_status "$@"
             ;;
         backup)

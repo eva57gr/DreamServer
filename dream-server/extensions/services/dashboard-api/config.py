@@ -24,6 +24,62 @@ EXTENSIONS_DIR = Path(
 DEFAULT_SERVICE_HOST = os.environ.get("SERVICE_HOST", "host.docker.internal")
 GPU_BACKEND = os.environ.get("GPU_BACKEND", "nvidia")
 
+
+def load_version_state(version_file: Path | None = None) -> dict[str, Any]:
+    """Load .version state with backward compatibility for legacy plain-text files."""
+    target = version_file or (Path(INSTALL_DIR) / ".version")
+    if not target.exists():
+        manifest_file = Path(INSTALL_DIR) / "manifest.json"
+        if manifest_file.exists():
+            try:
+                manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+                release_ver = str(manifest.get("release", {}).get("version") or "").strip()
+                if release_ver:
+                    return {"version": release_ver}
+            except Exception:
+                pass
+        return {"version": "0.0.0"}
+
+    try:
+        raw = target.read_text(encoding="utf-8").strip()
+    except Exception:
+        return {"version": "0.0.0"}
+
+    if not raw:
+        return {"version": "0.0.0"}
+
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            version = str(parsed.get("version") or "").strip() or "0.0.0"
+            parsed["version"] = version
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    # Legacy format: plain version string.
+    legacy_version = raw.splitlines()[0].strip()
+    if legacy_version:
+        return {"version": legacy_version}
+
+    manifest_file = Path(INSTALL_DIR) / "manifest.json"
+    if manifest_file.exists():
+        try:
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+            release_ver = str(manifest.get("release", {}).get("version") or "").strip()
+            if release_ver:
+                return {"version": release_ver}
+        except Exception:
+            pass
+
+    return {"version": "0.0.0"}
+
+
+def get_runtime_version(version_file: Path | None = None) -> str:
+    """Return current Dream Server version from .version state."""
+    state = load_version_state(version_file)
+    return str(state.get("version") or "0.0.0")
+
 # --- Manifest Loading ---
 
 

@@ -85,12 +85,16 @@ class VersionInfo(BaseModel):
     current: str
     latest: Optional[str] = None
     update_available: bool = False
+    status: Optional[str] = None
     changelog_url: Optional[str] = None
     checked_at: Optional[str] = None
+    last_check: Optional[str] = None
+    last_update: Optional[str] = None
 
 
 class UpdateAction(BaseModel):
-    action: str  # "check", "backup", "update"
+    action: str  # "check", "backup", "update", "rollback"
+    backup_id: Optional[str] = None
 
 
 class PrivacyShieldStatus(BaseModel):

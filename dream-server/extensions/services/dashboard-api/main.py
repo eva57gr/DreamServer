@@ -27,7 +27,7 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 # --- Local modules ---
-from config import SERVICES, INSTALL_DIR, DATA_DIR, SIDEBAR_ICONS
+from config import SERVICES, INSTALL_DIR, DATA_DIR, SIDEBAR_ICONS, get_runtime_version
 from models import (
     GPUInfo, ServiceStatus, DiskUsage, ModelInfo, BootstrapStatus,
     FullStatus, PortCheckRequest,
@@ -247,7 +247,7 @@ async def api_status(api_key: str = Depends(verify_api_key)):
         return {
             "gpu": None, "services": [], "model": None,
             "bootstrap": None, "uptime": 0,
-            "version": app.version, "tier": "Unknown",
+            "version": get_runtime_version(), "tier": "Unknown",
             "cpu": {"percent": 0, "temp_c": None},
             "ram": {"used_gb": 0, "total_gb": 0, "percent": 0},
             "inference": {"tokensPerSecond": 0, "lifetimeTokens": 0,
@@ -319,7 +319,7 @@ async def _build_api_status() -> dict:
     return {
         "gpu": gpu_data, "services": services_data, "model": model_data,
         "bootstrap": bootstrap_data, "uptime": get_uptime(),
-        "version": app.version, "tier": tier,
+        "version": get_runtime_version(), "tier": tier,
         "cpu": get_cpu_metrics(), "ram": get_ram_metrics(),
         "inference": {
             "tokensPerSecond": llama_metrics_data.get("tokens_per_second", 0),

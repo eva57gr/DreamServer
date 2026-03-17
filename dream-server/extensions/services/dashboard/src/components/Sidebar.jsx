@@ -12,7 +12,7 @@ const getExternalUrl = (port) =>
     ? `http://${window.location.hostname}:${port}`
     : `http://localhost:${port}`
 
-export default function Sidebar({ status, collapsed, onToggle }) {
+export default function Sidebar({ status, version, collapsed, onToggle }) {
   const [serviceTokens, setServiceTokens] = useState({})
   const [apiLinks, setApiLinks] = useState([])
 
@@ -32,6 +32,7 @@ export default function Sidebar({ status, collapsed, onToggle }) {
     () => getSidebarNavItems({ status }),
     [status]
   )
+  const updateAvailable = Boolean(version?.update_available)
 
   // Compute external links with auto-auth tokens (e.g. OpenClaw ?token=xxx)
   const externalLinks = useMemo(() => {
@@ -108,13 +109,16 @@ export default function Sidebar({ status, collapsed, onToggle }) {
       {/* Navigation */}
       <nav className="flex-1 p-4 overflow-y-auto overflow-x-hidden">
         <ul className="space-y-1">
-          {navItems.map(({ path, icon: Icon, label }) => (
+          {navItems.map(({ path, icon: Icon, label }) => {
+            const isSettings = path === '/settings'
+            const showUpdateBadge = isSettings && updateAvailable
+            return (
             <li key={path}>
               <NavLink
                 to={path}
                 title={collapsed ? label : undefined}
                 className={({ isActive }) =>
-                  `flex items-center ${collapsed ? 'justify-center' : ''} gap-3 px-3 py-2.5 rounded-lg transition-colors ${
+                  `relative flex items-center ${collapsed ? 'justify-center' : ''} gap-3 px-3 py-2.5 rounded-lg transition-colors ${
                     isActive
                       ? 'bg-indigo-600 text-white relative before:content-[""] before:absolute before:left-0 before:top-2 before:bottom-2 before:w-1 before:bg-indigo-300 before:rounded-r'
                       : 'text-zinc-400 hover:text-white hover:bg-zinc-800'
@@ -123,9 +127,17 @@ export default function Sidebar({ status, collapsed, onToggle }) {
               >
                 <Icon size={20} />
                 {!collapsed && <span>{label}</span>}
+                {!collapsed && showUpdateBadge && (
+                  <span className="ml-auto rounded-full bg-yellow-500/20 text-yellow-300 border border-yellow-500/40 px-2 py-0.5 text-[10px] font-semibold tracking-wide">
+                    UPDATE
+                  </span>
+                )}
+                {collapsed && showUpdateBadge && (
+                  <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-yellow-400" />
+                )}
               </NavLink>
             </li>
-          ))}
+          )})}
         </ul>
 
         {/* External Links — hidden when collapsed */}

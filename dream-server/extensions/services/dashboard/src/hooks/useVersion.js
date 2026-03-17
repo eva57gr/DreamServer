@@ -45,11 +45,12 @@ export function useVersion() {
 export async function triggerUpdate(action) {
   // C4 fix: Use relative URL for remote access
   const apiUrl = import.meta.env.VITE_API_URL || ''
+  const payload = typeof action === 'string' ? { action } : action
   
   const response = await fetch(`${apiUrl}/api/update`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action })
+    body: JSON.stringify(payload)
   })
   
   if (!response.ok) {

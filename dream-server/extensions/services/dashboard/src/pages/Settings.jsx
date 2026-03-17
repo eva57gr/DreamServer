@@ -14,11 +14,20 @@ const fetchJson = async (url, ms = 8000) => {
   }
 }
 
+const formatTimestamp = (value) => {
+  if (!value) return 'unknown'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleString()
+}
+
 export default function Settings() {
   const [version, setVersion] = useState(null)
   const [storage, setStorage] = useState(null)
   const [services, setServices] = useState([])
   const [statusCache, setStatusCache] = useState(null)
+  const [updateReadiness, setUpdateReadiness] = useState(null)
+  const [updateBusy, setUpdateBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState(null)
@@ -31,13 +40,18 @@ export default function Settings() {
     try {
       setLoading(true)
       setError(null)
-      const [versionRes, storageRes, statusRes] = await Promise.all([
+      const [versionRes, storageRes, statusRes, readinessRes] = await Promise.all([
         fetchJson(`${API_BASE}/api/version`),
         fetchJson(`${API_BASE}/api/storage`),
-        fetchJson(`${API_BASE}/api/status`)
+        fetchJson(`${API_BASE}/api/status`),
+        fetchJson(`${API_BASE}/api/update/readiness`)
       ])
 
       const versionData = versionRes.ok ? await versionRes.json() : {}
+      const readinessData = readinessRes.ok ? await readinessRes.json() : null
+      if (readinessData) {
+        setUpdateReadiness(readinessData)
+      }
       if (statusRes.ok) {
         const statusData = await statusRes.json()
         setStatusCache(statusData)
@@ -45,8 +59,9 @@ export default function Settings() {
         const hours = Math.floor(secs / 3600)
         const mins = Math.floor((secs % 3600) / 60)
         setVersion({
+          ...(readinessData || {}),
           ...versionData,
-          version: versionData.current || statusData.version,
+          version: versionData.current || readinessData?.current || statusData.version,
           tier: statusData.tier,
           uptime: hours > 0 ? `${hours}h ${mins}m` : `${mins}m`,
         })
@@ -54,7 +69,11 @@ export default function Settings() {
           setServices(statusData.services)
         }
       } else {
-        setVersion(versionData)
+        setVersion({
+          ...(readinessData || {}),
+          ...versionData,
+          version: versionData.current || readinessData?.current || versionData.version,
+        })
       }
       if (storageRes.ok) {
         setStorage(await storageRes.json())
@@ -67,8 +86,89 @@ export default function Settings() {
     }
   }
 
-  const handleCheckUpdates = () => {
-    setNotice({ type: 'info', text: 'Update channel not wired yet (v2.0).' })
+  const refreshReadiness = async () => {
+    const response = await fetchJson(`${API_BASE}/api/update/readiness`)
+    if (!response.ok) {
+      throw new Error('Update readiness check failed')
+    }
+    const data = await response.json()
+    setUpdateReadiness(data)
+    setVersion(prev => ({ ...(prev || {}), ...data, version: data.current || prev?.version }))
+    return data
+  }
+
+  const postUpdateAction = async (payload) => {
+    const response = await fetch(`${API_BASE}/api/update`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      throw new Error(data?.detail || 'Update action failed')
+    }
+    return data
+  }
+
+  const handleCheckUpdates = async () => {
+    try {
+      setUpdateBusy(true)
+      const data = await refreshReadiness()
+      if (data.update_available) {
+        setNotice({ type: 'warn', text: `Update available: ${data.current} → ${data.latest}` })
+      } else {
+        setNotice({ type: 'info', text: 'No update available. You are on the latest release.' })
+      }
+    } catch (err) {
+      setNotice({ type: 'danger', text: `Update check failed: ${err.message}` })
+    } finally {
+      setUpdateBusy(false)
+    }
+  }
+
+  const handleCreateBackup = async () => {
+    try {
+      setUpdateBusy(true)
+      const result = await postUpdateAction({ action: 'backup' })
+      if (result.success) {
+        setNotice({ type: 'info', text: 'Backup created successfully.' })
+        await refreshReadiness()
+      } else {
+        setNotice({ type: 'danger', text: 'Backup command failed. Check logs for details.' })
+      }
+    } catch (err) {
+      setNotice({ type: 'danger', text: `Backup failed: ${err.message}` })
+    } finally {
+      setUpdateBusy(false)
+    }
+  }
+
+  const handleRunUpdate = async () => {
+    if (updateReadiness?.compatibility?.available && updateReadiness?.compatibility?.ok === false) {
+      setNotice({
+        type: 'danger',
+        text: 'Update blocked by compatibility gate. Fix the reported issue before retrying.',
+      })
+      return
+    }
+    try {
+      setUpdateBusy(true)
+      await postUpdateAction({ action: 'update' })
+      setNotice({ type: 'warn', text: 'Update started in background. Refresh this page in a minute.' })
+    } catch (err) {
+      setNotice({ type: 'danger', text: `Update start failed: ${err.message}` })
+    } finally {
+      setUpdateBusy(false)
+    }
+  }
+
+  const handleShowRollbackCommand = () => {
+    const backupId = updateReadiness?.rollback?.latest_backup
+    if (!backupId) {
+      setNotice({ type: 'warn', text: 'No rollback backup is available yet.' })
+      return
+    }
+    setNotice({ type: 'warn', text: `Run on host: ./dream-update.sh rollback ${backupId}` })
   }
 
   const handleExportConfig = async () => {
@@ -103,6 +203,17 @@ export default function Settings() {
     down: 'bg-red-500',
     unknown: 'bg-zinc-600'
   }[status] || 'bg-zinc-600')
+
+  const updateAvailable = Boolean(updateReadiness?.update_available ?? version?.update_available ?? false)
+  const currentVersion = updateReadiness?.current || version?.current || version?.version || 'unknown'
+  const latestVersion = updateReadiness?.latest || version?.latest || null
+  const updateSystemAvailable = Boolean(updateReadiness?.update_system?.available)
+  const compatibilityAvailable = Boolean(updateReadiness?.compatibility?.available)
+  const compatibilityOk = updateReadiness?.compatibility?.ok === true
+  const rollbackAvailable = Boolean(updateReadiness?.rollback?.available)
+  const latestBackup = updateReadiness?.rollback?.latest_backup
+  const compatibilityDetails = updateReadiness?.compatibility?.details
+  const canRunUpdate = updateSystemAvailable && (!compatibilityAvailable || compatibilityOk)
 
   if (loading) {
     return (
@@ -226,18 +337,98 @@ export default function Settings() {
 
         {/* Updates */}
         <SettingsSection title="Updates" icon={RefreshCw}>
-          <div className="flex items-center justify-between">
+          <div className="space-y-4">
             <div>
-              <p className="text-white">You're up to date</p>
-              <p className="text-sm text-zinc-500">Last checked: just now</p>
+              <p className="text-white">
+                {updateAvailable
+                  ? `Update available: ${currentVersion} → ${latestVersion || 'unknown'}`
+                  : 'You are on the latest release'}
+              </p>
+              <p className="text-sm text-zinc-500">
+                Last checked: {formatTimestamp(updateReadiness?.checked_at || updateReadiness?.last_check || version?.checked_at)}
+              </p>
+              <p className="text-sm text-zinc-500">
+                Last updated: {formatTimestamp(updateReadiness?.last_update)}
+              </p>
             </div>
-            <button
-              onClick={handleCheckUpdates}
-              className="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-white rounded-lg text-sm flex items-center gap-2 transition-colors"
-            >
-              <RefreshCw size={16} />
-              Check for Updates
-            </button>
+
+            <div className="text-sm">
+              <span className="text-zinc-500">Compatibility gate: </span>
+              <span className={compatibilityAvailable ? (compatibilityOk ? 'text-green-400' : 'text-red-400') : 'text-zinc-400'}>
+                {compatibilityAvailable ? (compatibilityOk ? 'ready' : 'failed') : 'unavailable'}
+              </span>
+            </div>
+            {compatibilityDetails && (
+              <pre className="text-xs text-zinc-500 bg-zinc-950/50 border border-zinc-800 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap">
+                {compatibilityDetails}
+              </pre>
+            )}
+
+            <div className="text-sm">
+              <span className="text-zinc-500">Rollback: </span>
+              <span className={rollbackAvailable ? 'text-green-400' : 'text-zinc-400'}>
+                {rollbackAvailable
+                  ? `${updateReadiness?.rollback?.backup_count || 0} backup(s), latest ${latestBackup}`
+                  : 'no backups detected'}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={handleCheckUpdates}
+                disabled={updateBusy}
+                className="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-50 text-white rounded-lg text-sm flex items-center gap-2 transition-colors"
+              >
+                <RefreshCw size={16} className={updateBusy ? 'animate-spin' : ''} />
+                Check
+              </button>
+              <button
+                onClick={handleCreateBackup}
+                disabled={updateBusy || !updateSystemAvailable}
+                className="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-50 text-white rounded-lg text-sm transition-colors"
+              >
+                Backup
+              </button>
+              <button
+                onClick={handleRunUpdate}
+                disabled={updateBusy || !canRunUpdate}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-sm transition-colors"
+              >
+                Start Update
+              </button>
+              <button
+                onClick={handleShowRollbackCommand}
+                disabled={!rollbackAvailable}
+                className="px-4 py-2 bg-yellow-700 hover:bg-yellow-600 disabled:opacity-50 text-white rounded-lg text-sm transition-colors"
+              >
+                Rollback (CLI)
+              </button>
+            </div>
+
+            {rollbackAvailable && latestBackup && (
+              <div className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-3">
+                <p className="text-xs text-zinc-500 mb-1">Latest rollback command</p>
+                <code className="text-xs text-zinc-300 font-mono">
+                  ./dream-update.sh rollback {latestBackup}
+                </code>
+              </div>
+            )}
+
+            {!updateSystemAvailable && (
+              <p className="text-xs text-zinc-500">
+                Update script is not available in this runtime. Use host CLI: <span className="font-mono">./dream-update.sh</span>
+              </p>
+            )}
+            {!updateReadiness && (
+              <p className="text-xs text-zinc-500">
+                Update readiness endpoint unavailable. Basic version check is still active.
+              </p>
+            )}
+            {!updateAvailable && latestVersion === null && (
+              <p className="text-xs text-zinc-500">
+                Could not resolve latest release metadata. Check network connectivity and retry.
+              </p>
+            )}
           </div>
         </SettingsSection>
 

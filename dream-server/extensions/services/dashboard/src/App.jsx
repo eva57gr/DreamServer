@@ -7,8 +7,8 @@ import { useVersion } from './hooks/useVersion'
 import { getInternalRoutes } from './plugins/registry'
 
 function App() {
-  const { status, loading, error } = useSystemStatus()
-  const { version, dismissUpdate } = useVersion()
+  const { status, loading } = useSystemStatus()
+  const { version } = useVersion()
   const [firstRun, setFirstRun] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     return localStorage.getItem('dream-sidebar-collapsed') === 'true'
@@ -36,6 +36,7 @@ function App() {
     <div className="flex min-h-screen bg-[#0f0f13]">
       <Sidebar
         status={status}
+        version={version}
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(c => !c)}
       />

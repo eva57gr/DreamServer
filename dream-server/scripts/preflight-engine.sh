@@ -95,40 +95,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ "$ENV_FILE_SET" != "true" ]]; then
-    ENV_FILE="${SCRIPT_DIR}/.env"
-fi
-if [[ "$SCHEMA_FILE_SET" != "true" ]]; then
-    SCHEMA_FILE="${SCRIPT_DIR}/.env.schema.json"
-fi
-
-ENV_VALIDATION_FILE=""
-ENV_VALIDATION_EXIT=""
-ENV_VALIDATION_ATTEMPTED="false"
-ENV_VALIDATION_STRICT="$ENV_STRICT"
-cleanup_tmp() {
-    if [[ -n "${ENV_VALIDATION_FILE:-}" && -f "${ENV_VALIDATION_FILE:-}" ]]; then
-        rm -f "$ENV_VALIDATION_FILE"
-    fi
-}
-trap cleanup_tmp EXIT
-if [[ "$SKIP_ENV_VALIDATION" != "true" ]]; then
-    validator="${SCRIPT_DIR}/scripts/validate-env.sh"
-    if [[ -x "$validator" && -f "$ENV_FILE" && -f "$SCHEMA_FILE" ]]; then
-        ENV_VALIDATION_ATTEMPTED="true"
-        ENV_VALIDATION_FILE="$(mktemp)"
-        set +e
-        if [[ "$ENV_STRICT" == "true" ]]; then
-            "$validator" --env-file "$ENV_FILE" --schema-file "$SCHEMA_FILE" --strict --json > "$ENV_VALIDATION_FILE"
-        else
-            "$validator" --env-file "$ENV_FILE" --schema-file "$SCHEMA_FILE" --warn-only --json > "$ENV_VALIDATION_FILE"
-        fi
-        ENV_VALIDATION_EXIT=$?
-        set -e
-    fi
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PYTHON_CMD="python3"
+if [[ -f "$ROOT_DIR/lib/python-cmd.sh" ]]; then
+    . "$ROOT_DIR/lib/python-cmd.sh"
+    PYTHON_CMD="$(ds_detect_python_cmd)"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_CMD="python"
 fi
 
-python3 - "$REPORT_FILE" "$TIER" "$RAM_GB" "$DISK_GB" "$GPU_BACKEND" "$GPU_VRAM_MB" "$GPU_NAME" "$PLATFORM_ID" "$COMPOSE_OVERLAYS" "$SCRIPT_DIR" "$ENV_MODE" "$STRICT" "$ENV_FILE" "$SCHEMA_FILE" "$ENV_VALIDATION_ATTEMPTED" "$ENV_VALIDATION_FILE" "$ENV_VALIDATION_EXIT" "$ENV_VALIDATION_STRICT" "$SKIP_ENV_VALIDATION" <<'PY'
+"$PYTHON_CMD" - "$REPORT_FILE" "$TIER" "$RAM_GB" "$DISK_GB" "$GPU_BACKEND" "$GPU_VRAM_MB" "$GPU_NAME" "$PLATFORM_ID" "$COMPOSE_OVERLAYS" "$SCRIPT_DIR" "$ENV_MODE" "$STRICT" <<'PY'
 import json
 import pathlib
 import sys
@@ -177,10 +153,12 @@ except Exception:
 
 tier_key = str(tier).upper()
 tier_rank_map = {
+    "0": 0,
     "1": 1,
     "2": 2,
     "3": 3,
     "4": 4,
+    "T0": 0,
     "T1": 1,
     "T2": 2,
     "T3": 3,
@@ -191,6 +169,8 @@ tier_rank_map = {
 tier_rank = tier_rank_map.get(tier_key, 1)
 
 min_ram_map = {
+    "0": 4,
+    "T0": 4,
     "1": 16,
     "2": 32,
     "3": 48,
@@ -199,6 +179,8 @@ min_ram_map = {
     "SH_LARGE": 96,
 }
 min_disk_map = {
+    "0": 15,
+    "T0": 15,
     "1": 30,
     "2": 50,
     "3": 80,

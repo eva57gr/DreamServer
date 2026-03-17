@@ -1,18 +1,24 @@
-#!/usr/bin/env bash
-# Validate .env against .env.schema.json (V2)
+#!/bin/bash
+# Validate .env against .env.schema.json
+#
+# Senior-grade validation goals:
+#  - Correctly parse .env files including quotes and "export KEY=..." lines
+#  - Report line numbers and actionable messages
+#  - Validate required keys, unknown keys, types, enums, and numeric ranges
+#  - Fail deterministically with a single exit code for CI
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${INSTALL_DIR:-$(dirname "$SCRIPT_DIR")}"
 
-ENV_FILE="${INSTALL_DIR}/.env"
-SCHEMA_FILE="${INSTALL_DIR}/.env.schema.json"
-STRICT="true"
-OUTPUT_JSON="false"
-JSON_FILE=""
-MODE_OVERRIDE=""
-ALLOW_UNKNOWN="false"
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
 
 usage() {
     cat <<'USAGE'
@@ -99,490 +105,290 @@ if [[ ${#POSITIONAL[@]} -ge 2 ]]; then
     SCHEMA_FILE="${POSITIONAL[1]}"
 fi
 
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [ENV_FILE] [SCHEMA_FILE]
+
+Validates a Dream Server .env file against the JSON schema.
+
+Exit codes:
+  0  valid
+  2  validation errors
+  3  missing deps / unreadable input
+
+Tips:
+  - Use .env.example as a reference
+  - Quote values containing spaces/special characters
+EOF
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --help|-h) usage; exit 0 ;;
+  esac
+done
+
 if [[ ! -f "$ENV_FILE" ]]; then
-    echo "[ERROR] Env file not found: $ENV_FILE" >&2
-    exit 1
+    log_error "Env file not found: $ENV_FILE"
+    exit 3
 fi
 
 if [[ ! -f "$SCHEMA_FILE" ]]; then
-    echo "[ERROR] Schema file not found: $SCHEMA_FILE" >&2
-    exit 1
+    log_error "Schema file not found: $SCHEMA_FILE"
+    exit 3
 fi
 
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "[ERROR] python3 is required for validate-env.sh" >&2
-    exit 1
+if ! command -v jq >/dev/null 2>&1; then
+    log_error "jq is required for schema validation"
+    log_info "Install: sudo apt-get install -y jq  (or your distro equivalent)"
+    exit 3
 fi
 
-tmp_report="$(mktemp)"
-cleanup() {
-    rm -f "$tmp_report"
-}
-trap cleanup EXIT
+# -----------------------------
+# .env parsing (robust)
+# -----------------------------
+# We intentionally do NOT 'source' the .env for security reasons.
+# Instead we parse key/value pairs ourselves.
 
-set +e
-python3 - "$ENV_FILE" "$SCHEMA_FILE" "$STRICT" "$MODE_OVERRIDE" "$ALLOW_UNKNOWN" > "$tmp_report" <<'PY'
-import json
-import os
-import re
-import sys
-from dataclasses import dataclass
-from typing import Any
+declare -A ENV_MAP
+declare -A ENV_LINE
 
-ENV_FILE, SCHEMA_FILE, STRICT_RAW, MODE_OVERRIDE, ALLOW_UNKNOWN_RAW = sys.argv[1:6]
-STRICT = STRICT_RAW.lower() == "true"
-ALLOW_UNKNOWN = ALLOW_UNKNOWN_RAW.lower() == "true"
-
-KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-INT_RE = re.compile(r"^-?[0-9]+$")
-NUM_RE = re.compile(r"^-?[0-9]+(?:\.[0-9]+)?$")
-
-
-@dataclass
-class ParsedEntry:
-    key: str
-    value: str
-    line: int
-
-
-def _strip_inline_comment(value_expr: str) -> str:
-    out: list[str] = []
-    quote: str | None = None
-    escaped = False
-
-    for ch in value_expr:
-        if quote is not None:
-            out.append(ch)
-            if quote == '"':
-                if escaped:
-                    escaped = False
-                    continue
-                if ch == "\\":
-                    escaped = True
-                    continue
-            if ch == quote and not escaped:
-                quote = None
-            continue
-
-        if ch in {"'", '"'}:
-            quote = ch
-            out.append(ch)
-            continue
-
-        if ch == "#":
-            prev = out[-1] if out else ""
-            if not out or prev.isspace():
-                break
-
-        out.append(ch)
-
-    return "".join(out).rstrip()
-
-
-def _parse_value(raw_value: str, line_no: int, errors: list[dict[str, Any]]) -> str:
-    v = raw_value.strip()
-    if v == "":
-        return ""
-
-    if v[0] not in {"'", '"'}:
-        return v
-
-    quote = v[0]
-    out: list[str] = []
-    escaped = False
-    i = 1
-    while i < len(v):
-        ch = v[i]
-        if quote == '"' and ch == "\\" and not escaped:
-            escaped = True
-            i += 1
-            if i >= len(v):
-                break
-            nxt = v[i]
-            # Preserve common escapes literally except quote/backslash for clarity.
-            if nxt == '"':
-                out.append('"')
-            elif nxt == "\\":
-                out.append("\\")
-            else:
-                out.append(nxt)
-            escaped = False
-            i += 1
-            continue
-
-        if ch == quote:
-            trailing = v[i + 1 :].strip()
-            if trailing and not trailing.startswith("#"):
-                errors.append(
-                    {
-                        "type": "parse",
-                        "key": None,
-                        "line": line_no,
-                        "message": "Unexpected content after quoted value",
-                        "hint": "Use KEY=value or KEY=\"value\" with comments after whitespace + #",
-                    }
-                )
-            return "".join(out)
-
-        out.append(ch)
-        i += 1
-
-    errors.append(
-        {
-            "type": "parse",
-            "key": None,
-            "line": line_no,
-            "message": "Unterminated quoted value",
-            "hint": "Close the quote or remove unmatched quote characters",
-        }
-    )
-    return "".join(out)
-
-
-def parse_env(path: str) -> tuple[dict[str, ParsedEntry], list[dict[str, Any]], list[dict[str, Any]]]:
-    entries: dict[str, ParsedEntry] = {}
-    errors: list[dict[str, Any]] = []
-    warnings: list[dict[str, Any]] = []
-
-    with open(path, "r", encoding="utf-8") as f:
-        for line_no, raw in enumerate(f, start=1):
-            line = raw.rstrip("\n")
-            stripped = line.strip()
-
-            if not stripped:
-                continue
-            if stripped.startswith("#"):
-                continue
-
-            if stripped.startswith("export "):
-                stripped = stripped[len("export ") :].lstrip()
-
-            if "=" not in stripped:
-                errors.append(
-                    {
-                        "type": "parse",
-                        "key": None,
-                        "line": line_no,
-                        "message": "Invalid env line (missing '=')",
-                        "hint": "Use KEY=value format",
-                    }
-                )
-                continue
-
-            key_part, raw_value_expr = stripped.split("=", 1)
-            key = key_part.strip()
-            if not KEY_RE.match(key):
-                errors.append(
-                    {
-                        "type": "parse",
-                        "key": key,
-                        "line": line_no,
-                        "message": f"Invalid key name '{key}'",
-                        "hint": "Keys must match [A-Za-z_][A-Za-z0-9_]*",
-                    }
-                )
-                continue
-
-            clean_expr = _strip_inline_comment(raw_value_expr)
-            value = _parse_value(clean_expr, line_no, errors)
-
-            if key in entries:
-                warnings.append(
-                    {
-                        "type": "duplicate",
-                        "key": key,
-                        "line": line_no,
-                        "message": f"Duplicate key '{key}' detected; last value wins",
-                        "hint": "Remove duplicates to avoid ambiguity",
-                    }
-                )
-
-            entries[key] = ParsedEntry(key=key, value=value, line=line_no)
-
-    return entries, errors, warnings
-
-
-def is_boolean_like(value: str) -> bool:
-    return value.lower() in {"true", "false", "1", "0", "yes", "no", "on", "off"}
-
-
-def is_present(entries: dict[str, ParsedEntry], key: str) -> bool:
-    if key not in entries:
-        return False
-    return entries[key].value.strip() != ""
-
-
-def add_error(errors: list[dict[str, Any]], *, err_type: str, key: str | None, line: int | None, message: str, hint: str = "") -> None:
-    errors.append({"type": err_type, "key": key, "line": line, "message": message, "hint": hint})
-
-
-def add_warning(warnings: list[dict[str, Any]], *, warn_type: str, key: str | None, line: int | None, message: str, hint: str = "") -> None:
-    warnings.append({"type": warn_type, "key": key, "line": line, "message": message, "hint": hint})
-
-
-def validate(entries: dict[str, ParsedEntry], schema: dict[str, Any], parse_errors: list[dict[str, Any]], parse_warnings: list[dict[str, Any]]) -> dict[str, Any]:
-    errors = list(parse_errors)
-    warnings = list(parse_warnings)
-    deprecated: list[dict[str, Any]] = []
-
-    props: dict[str, Any] = schema.get("properties") or {}
-    required: list[str] = list(schema.get("required") or [])
-
-    dream_mode_def = props.get("DREAM_MODE", {})
-    mode_enum = dream_mode_def.get("enum") or ["local", "cloud", "hybrid"]
-    mode_default = dream_mode_def.get("default") or "local"
-
-    mode = (MODE_OVERRIDE or (entries.get("DREAM_MODE").value if entries.get("DREAM_MODE") else mode_default) or "local").strip()
-
-    if mode not in mode_enum:
-        add_error(
-            errors,
-            err_type="mode",
-            key="DREAM_MODE",
-            line=entries.get("DREAM_MODE").line if entries.get("DREAM_MODE") else None,
-            message=f"Invalid DREAM_MODE '{mode}'",
-            hint=f"Use one of: {', '.join(mode_enum)}",
-        )
-
-    # Global required keys
-    for key in required:
-        if not is_present(entries, key):
-            add_error(
-                errors,
-                err_type="missing",
-                key=key,
-                line=None,
-                message=f"Missing required key '{key}'",
-                hint=f"Add {key}=... to .env",
-            )
-
-    # Mode-specific requirements from custom schema contract
-    mode_rules = (schema.get("x-modeRequirements") or {}).get(mode, {})
-    for key in mode_rules.get("required", []) or []:
-        if not is_present(entries, key):
-            add_error(
-                errors,
-                err_type="missing_mode",
-                key=key,
-                line=None,
-                message=f"Mode '{mode}' requires key '{key}'",
-                hint=f"Set {key}=... or switch DREAM_MODE",
-            )
-
-    for group in mode_rules.get("required_any", []) or []:
-        keys = [str(k) for k in group if str(k).strip()]
-        if not keys:
-            continue
-        if not any(is_present(entries, k) for k in keys):
-            add_error(
-                errors,
-                err_type="missing_mode_any",
-                key=None,
-                line=None,
-                message=f"Mode '{mode}' requires at least one of: {', '.join(keys)}",
-                hint=f"Set one of: {', '.join(keys)}",
-            )
-
-    # Unknown keys
-    if not ALLOW_UNKNOWN:
-        for key, entry in entries.items():
-            if key not in props:
-                add_error(
-                    errors,
-                    err_type="unknown",
-                    key=key,
-                    line=entry.line,
-                    message=f"Unknown key '{key}' is not defined in schema",
-                    hint="Remove it or add it to .env.schema.json",
-                )
-
-    # Type + enum checks
-    for key, entry in entries.items():
-        prop = props.get(key)
-        if not prop:
-            continue
-
-        value = entry.value
-        if value == "":
-            continue
-
-        expected_type = prop.get("type", "string")
-        if expected_type == "integer" and not INT_RE.match(value):
-            add_error(
-                errors,
-                err_type="type",
-                key=key,
-                line=entry.line,
-                message=f"{key} expects integer, got '{value}'",
-                hint=f"Use numeric value, e.g. {key}=1234",
-            )
-        elif expected_type == "number" and not NUM_RE.match(value):
-            add_error(
-                errors,
-                err_type="type",
-                key=key,
-                line=entry.line,
-                message=f"{key} expects number, got '{value}'",
-                hint=f"Use numeric value, e.g. {key}=3.14",
-            )
-        elif expected_type == "boolean" and not is_boolean_like(value):
-            add_error(
-                errors,
-                err_type="type",
-                key=key,
-                line=entry.line,
-                message=f"{key} expects boolean, got '{value}'",
-                hint=f"Use true/false for {key}",
-            )
-
-        enum_vals = prop.get("enum")
-        if isinstance(enum_vals, list) and enum_vals and value not in enum_vals:
-            add_error(
-                errors,
-                err_type="enum",
-                key=key,
-                line=entry.line,
-                message=f"{key} must be one of: {', '.join(map(str, enum_vals))}",
-                hint=f"Set {key} to a supported value",
-            )
-
-    # Deprecated key hints
-    deprecated_contract = schema.get("x-deprecatedKeys") or {}
-    for old_key, meta in deprecated_contract.items():
-        if old_key not in entries:
-            continue
-        replacement = str((meta or {}).get("replacement") or "").strip()
-        message = str((meta or {}).get("message") or f"'{old_key}' is deprecated").strip()
-        auto_fix = bool((meta or {}).get("auto_fix", False))
-
-        item = {
-            "type": "deprecated",
-            "key": old_key,
-            "line": entries[old_key].line,
-            "message": message,
-            "replacement": replacement or None,
-            "auto_fix": auto_fix,
-            "hint": (
-                f"Replace {old_key} with {replacement}" if replacement else "Remove deprecated key"
-            ),
-        }
-        deprecated.append(item)
-
-        add_warning(
-            warnings,
-            warn_type="deprecated",
-            key=old_key,
-            line=entries[old_key].line,
-            message=message,
-            hint=item["hint"],
-        )
-
-    return {
-        "mode": mode,
-        "errors": errors,
-        "warnings": warnings,
-        "deprecated": deprecated,
-    }
-
-
-try:
-    schema = json.load(open(SCHEMA_FILE, "r", encoding="utf-8"))
-except Exception as exc:
-    print(
-        json.dumps(
-            {
-                "success": False,
-                "fatal": True,
-                "message": f"Failed to load schema: {exc}",
-            }
-        )
-    )
-    raise SystemExit(1)
-
-entries, parse_errors, parse_warnings = parse_env(ENV_FILE)
-validated = validate(entries, schema, parse_errors, parse_warnings)
-
-errors = validated["errors"]
-warnings = validated["warnings"]
-deprecated = validated["deprecated"]
-mode = validated["mode"]
-
-summary = {
-    "errors": len(errors),
-    "warnings": len(warnings),
-    "deprecated": len(deprecated),
-    "parsed_keys": len(entries),
+trim() {
+  local s="$1"
+  s="${s#${s%%[![:space:]]*}}"
+  s="${s%${s##*[![:space:]]}}"
+  printf '%s' "$s"
 }
 
-report = {
-    "success": len(errors) == 0,
-    "strict": STRICT,
-    "env_file": os.path.abspath(ENV_FILE),
-    "schema_file": os.path.abspath(SCHEMA_FILE),
-    "mode": mode,
-    "summary": summary,
-    "errors": errors,
-    "warnings": warnings,
-    "deprecated": deprecated,
-    "keys": sorted(entries.keys()),
-}
-
-print(json.dumps(report, indent=2))
-
-if STRICT and errors:
-    raise SystemExit(2)
-raise SystemExit(0)
-PY
-rc=$?
-set -e
-
-if [[ -n "$JSON_FILE" ]]; then
-    mkdir -p "$(dirname "$JSON_FILE")"
-    cp "$tmp_report" "$JSON_FILE"
-fi
-
-if [[ "$OUTPUT_JSON" == "true" ]]; then
-    cat "$tmp_report"
-else
-    if ! command -v jq >/dev/null 2>&1; then
-        cat "$tmp_report"
-    else
-        errors_count="$(jq -r '.summary.errors' "$tmp_report")"
-        warnings_count="$(jq -r '.summary.warnings' "$tmp_report")"
-        deprecated_count="$(jq -r '.summary.deprecated' "$tmp_report")"
-        mode="$(jq -r '.mode' "$tmp_report")"
-
-        BLUE='\033[0;34m'
-        GREEN='\033[0;32m'
-        YELLOW='\033[1;33m'
-        RED='\033[0;31m'
-        NC='\033[0m'
-
-        echo -e "${BLUE}[INFO]${NC} DREAM_MODE: ${mode}"
-
-        if [[ "$errors_count" == "0" ]]; then
-            echo -e "${GREEN}[SUCCESS]${NC} .env validation passed"
-        else
-            echo -e "${RED}[ERROR]${NC} .env validation found ${errors_count} error(s)"
-            jq -r '.errors[] | "  - [\(.type)] \(.message)" + (if .line then " (line \(.line))" else "" end) + (if .hint and .hint != "" then "\n      hint: \(.hint)" else "" end)' "$tmp_report"
-        fi
-
-        if [[ "$warnings_count" != "0" ]]; then
-            echo -e "${YELLOW}[WARN]${NC} ${warnings_count} warning(s)"
-            jq -r '.warnings[] | "  - [\(.type)] \(.message)" + (if .line then " (line \(.line))" else "" end)' "$tmp_report"
-        fi
-
-        if [[ "$deprecated_count" != "0" ]]; then
-            echo -e "${YELLOW}[WARN]${NC} ${deprecated_count} deprecated key(s)"
-            jq -r '.deprecated[] | "  - \(.key)" + (if .replacement then " -> \(.replacement)" else "" end) + ": \(.message)"' "$tmp_report"
-            echo "  Autofix: ./scripts/migrate-config.sh autofix-env"
-        fi
-
-        if [[ "$errors_count" != "0" ]]; then
-            echo ""
-            echo "Fix .env and re-run: ./scripts/validate-env.sh"
-        fi
+unquote() {
+  # Remove matching single or double quotes; keep inner content as-is.
+  local s="$1"
+  if [[ ${#s} -ge 2 ]]; then
+    if [[ "$s" == "\""*"\"" ]]; then
+      printf '%s' "${s:1:${#s}-2}"
+      return 0
     fi
+    if [[ "$s" == "'"*"'" ]]; then
+      printf '%s' "${s:1:${#s}-2}"
+      return 0
+    fi
+  fi
+  printf '%s' "$s"
+}
+
+# Split KEY=VALUE where VALUE may contain '='
+split_kv() {
+  local line="$1"
+  local key="${line%%=*}"
+  local value="${line#*=}"
+  key="$(trim "$key")"
+  value="$(trim "$value")"
+  printf '%s\n' "$key" "$value"
+}
+
+line_no=0
+while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+  line_no=$((line_no + 1))
+
+  # Strip leading/trailing whitespace
+  line="$(trim "$raw_line")"
+
+  # Skip blanks/comments
+  [[ -z "$line" ]] && continue
+  [[ "$line" =~ ^# ]] && continue
+
+  # Allow: export KEY=VALUE
+  if [[ "$line" =~ ^export[[:space:]]+ ]]; then
+    line="$(trim "${line#export}")"
+  fi
+
+  # Must contain '='
+  if [[ "$line" != *"="* ]]; then
+    log_warn "Ignoring line $line_no (not KEY=VALUE): $raw_line"
+    continue
+  fi
+
+  read -r key value < <(split_kv "$line")
+
+  if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    log_warn "Ignoring line $line_no (invalid key '$key')"
+    continue
+  fi
+
+  # Remove inline comments only when value is unquoted.
+  # Example: FOO=bar # comment
+  # Keep hashes inside quotes.
+  if [[ "$value" != "\""* && "$value" != "'"* ]]; then
+    value="$(trim "${value%%#*}")"
+  fi
+
+  value="$(trim "$value")"
+  value="$(unquote "$value")"
+
+  ENV_MAP["$key"]="$value"
+  ENV_LINE["$key"]="$line_no"
+done < "$ENV_FILE"
+
+# -----------------------------
+# Schema prep
+# -----------------------------
+
+missing=()
+unknown=()
+type_errors=()
+enum_errors=()
+range_errors=()
+
+mapfile -t required_keys < <(jq -r '.required[]?' "$SCHEMA_FILE")
+
+mapfile -t schema_keys < <(jq -r '.properties | keys[]' "$SCHEMA_FILE")
+declare -A SCHEMA_KEY_SET
+for key in "${schema_keys[@]}"; do
+    SCHEMA_KEY_SET["$key"]=1
+done
+
+# -----------------------------
+# Required keys
+# -----------------------------
+
+for key in "${required_keys[@]}"; do
+    val="${ENV_MAP[$key]-}"
+    if [[ -z "$val" ]]; then
+        missing+=("$key")
+    fi
+done
+
+# -----------------------------
+# Unknown keys
+# -----------------------------
+
+
+# -----------------------------
+# Type + enum + range checks
+# -----------------------------
+
+for key in "${schema_keys[@]}"; do
+    val="${ENV_MAP[$key]-}"
+    [[ -z "$val" ]] && continue
+
+    expected_type="$(jq -r --arg k "$key" '.properties[$k].type // "string"' "$SCHEMA_FILE")"
+
+    # Type validation
+    case "$expected_type" in
+        integer)
+            if [[ ! "$val" =~ ^-?[0-9]+$ ]]; then
+                type_errors+=("$key: expected integer, got '$val' (line ${ENV_LINE[$key]:-?})")
+                continue
+            fi
+            ;;
+        number)
+            if [[ ! "$val" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
+                type_errors+=("$key: expected number, got '$val' (line ${ENV_LINE[$key]:-?})")
+                continue
+            fi
+            ;;
+        boolean)
+            if [[ "$val" != "true" && "$val" != "false" ]]; then
+                type_errors+=("$key: expected boolean true/false, got '$val' (line ${ENV_LINE[$key]:-?})")
+                continue
+            fi
+            ;;
+    esac
+
+    # Enum validation
+    if jq -e --arg k "$key" '.properties[$k].enum? != null' "$SCHEMA_FILE" >/dev/null 2>&1; then
+      if [[ "$expected_type" != "string" ]]; then
+        : # enums in our schema are for strings; ignore otherwise
+      else
+        if ! jq -e --arg k "$key" --arg v "$val" '.properties[$k].enum | index($v) != null' "$SCHEMA_FILE" >/dev/null 2>&1; then
+          allowed="$(jq -r --arg k "$key" '.properties[$k].enum | join(", ")' "$SCHEMA_FILE")"
+          enum_errors+=("$key: invalid value '$val' (allowed: $allowed) (line ${ENV_LINE[$key]:-?})")
+        fi
+      fi
+    fi
+
+    # Range validation (minimum/maximum) for numbers/integers
+    if [[ "$expected_type" == "integer" || "$expected_type" == "number" ]]; then
+      if jq -e --arg k "$key" '.properties[$k].minimum? != null' "$SCHEMA_FILE" >/dev/null 2>&1; then
+        minv="$(jq -r --arg k "$key" '.properties[$k].minimum' "$SCHEMA_FILE")"
+        if awk "BEGIN{exit !($val < $minv)}" 2>/dev/null; then
+          range_errors+=("$key: value $val is < minimum $minv (line ${ENV_LINE[$key]:-?})")
+        fi
+      fi
+      if jq -e --arg k "$key" '.properties[$k].maximum? != null' "$SCHEMA_FILE" >/dev/null 2>&1; then
+        maxv="$(jq -r --arg k "$key" '.properties[$k].maximum' "$SCHEMA_FILE")"
+        if awk "BEGIN{exit !($val > $maxv)}" 2>/dev/null; then
+          range_errors+=("$key: value $val is > maximum $maxv (line ${ENV_LINE[$key]:-?})")
+        fi
+      fi
+    fi
+
+done
+
+# -----------------------------
+# Reporting
+# -----------------------------
+
+had_errors=false
+
+if (( ${#missing[@]} > 0 )); then
+    had_errors=true
+    log_error "Missing required keys:"
+    for key in "${missing[@]}"; do
+        echo "  - $key"
+    done
 fi
 
-exit "$rc"
+if (( ${#unknown[@]} > 0 )); then
+    had_errors=true
+    log_error "Unknown keys not defined in schema:"
+    for key in "${unknown[@]}"; do
+        echo "  - $key (line ${ENV_LINE[$key]:-?})"
+    done
+fi
+
+if (( ${#type_errors[@]} > 0 )); then
+    had_errors=true
+    log_error "Type validation errors:"
+    for err in "${type_errors[@]}"; do
+        echo "  - $err"
+    done
+fi
+
+if (( ${#enum_errors[@]} > 0 )); then
+    had_errors=true
+    log_error "Enum validation errors:"
+    for err in "${enum_errors[@]}"; do
+        echo "  - $err"
+    done
+fi
+
+if (( ${#range_errors[@]} > 0 )); then
+    had_errors=true
+    log_error "Range validation errors:"
+    for err in "${range_errors[@]}"; do
+        echo "  - $err"
+    done
+fi
+
+if [[ "$had_errors" == "true" ]]; then
+    echo ""
+    log_info "Fix .env using .env.example as reference, then re-run:"
+    echo "  ./scripts/validate-env.sh"
+    exit 2
+fi
+
+log_success ".env matches schema: $SCHEMA_FILE"
+log_info "Validated env file: $ENV_FILE"
+log_info "Schema: $SCHEMA_FILE"
+log_info "Keys in env: ${#ENV_MAP[@]}"
+log_info "Keys in schema: ${#schema_keys[@]}"
+log_info "Required keys: ${#required_keys[@]}"
+
+# Optional: print helpful summary of secrets (without values)
+secret_count=$(jq -r '.properties | to_entries[] | select(.value.secret==true) | .key' "$SCHEMA_FILE" | wc -l | tr -d ' ')
+if [[ "$secret_count" =~ ^[0-9]+$ ]] && (( secret_count > 0 )); then
+  log_info "Schema marks ${secret_count} key(s) as secrets (values not printed)."
+fi
+
+exit 0

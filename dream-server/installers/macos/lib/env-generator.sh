@@ -90,7 +90,8 @@ generate_dream_env() {
     webui_secret=$(new_secure_hex 32)
     local n8n_pass
     n8n_pass=$(new_secure_base64 16)
-    local litellm_key="sk-dream-$(new_secure_hex 16)"
+    local litellm_key
+    litellm_key="sk-dream-$(new_secure_hex 16)"
     local livekit_secret
     livekit_secret=$(new_secure_base64 32)
     local livekit_api_key

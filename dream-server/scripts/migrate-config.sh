@@ -117,8 +117,9 @@ compare_versions_code() {
 cmd_backup() {
     log_info "Backing up current configuration..."
     
-    local backup_name="config-$(date +%Y%m%d-%H%M%S)"
-    local backup_path="${BACKUP_DIR}/${backup_name}"
+    local backup_name backup_path
+    backup_name="config-$(date +%Y%m%d-%H%M%S)"
+    backup_path="${BACKUP_DIR}/${backup_name}"
     
     mkdir -p "$backup_path"
     
@@ -186,10 +187,11 @@ cmd_check() {
     log_info "Current version: $current_version"
     log_info "Last migrated: $last_migrated"
     
+    compare_versions "$current_version" "$last_migrated"
     local result
-    result="$(compare_versions_code "$current_version" "$last_migrated")"
-    
-    if [[ $result -eq 1 ]]; then
+    result=$?
+
+    if [[ $result -eq 2 ]]; then
         log_warn "Migration needed: $last_migrated → $current_version"
         
         # List pending migrations

@@ -23,7 +23,7 @@ show_phase 5 6 "Starting Services" "~2-3 minutes"
 if $DRY_RUN; then
     log "[DRY RUN] Would start services: $DOCKER_COMPOSE_CMD $COMPOSE_FLAGS up -d"
 else
-    cd "$INSTALL_DIR"
+    cd "$INSTALL_DIR" || exit 1
     # Convert COMPOSE_FLAGS string to array for safe word-splitting
     read -ra COMPOSE_FLAGS_ARR <<< "$COMPOSE_FLAGS"
     mkdir -p "$INSTALL_DIR/logs"

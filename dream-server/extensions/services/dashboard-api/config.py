@@ -200,4 +200,5 @@ SIDEBAR_ICONS = {
     "perplexica": "Search",
     "comfyui": "Image",
     "token-spy": "Terminal",
+    "langfuse": "BarChart2",
 }
